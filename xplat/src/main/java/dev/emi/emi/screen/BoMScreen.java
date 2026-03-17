@@ -891,7 +891,7 @@ public class BoMScreen extends Screen {
 			multiplier = node.amount * (int) Math.ceil(multiplier / (float) divisor);
 		}
 		if (node.hasComparisons()) {
-			TreeVolume left = null;
+			List<TreeVolume> comparisonVolumes = Lists.newArrayList();
 			for (int i = 0; i < node.comparisons.size(); i++) {
 				MaterialNode.Comparison comparison = node.comparisons.get(i);
 				int childColor = getBranchColor(path + "/cmp", i, colorSeed);
@@ -903,18 +903,15 @@ public class BoMScreen extends Screen {
 					volume.nodes.get(0).comparisonCost = comparison.estimatedCost;
 					volume.nodes.get(0).comparisonSelected = comparison.selected;
 				}
-				if (left == null) {
-					left = volume;
-				} else {
-					left.addToRight(volume, COMPARISON_HORIZONTAL_SPACING);
-				}
+				comparisonVolumes.add(volume);
 			}
-			if (left != null) {
-				left.addHead(node, multiplier, depth * NODE_VERTICAL_SPACING, chance, path, outlineColor);
-				if (!left.nodes.isEmpty()) {
-					left.nodes.get(0).comparisonHead = true;
+			if (!comparisonVolumes.isEmpty()) {
+				TreeVolume combined = TreeVolume.combineComparisonLanes(comparisonVolumes, COMPARISON_HORIZONTAL_SPACING);
+				combined.addHead(node, multiplier, depth * NODE_VERTICAL_SPACING, chance, path, outlineColor);
+				if (!combined.nodes.isEmpty()) {
+					combined.nodes.get(0).comparisonHead = true;
 				}
-				return left;
+				return combined;
 			}
 		}
 		if (node.recipe != null && node.children.size() > 0 && node.state == FoldState.EXPANDED) {
@@ -1684,6 +1681,45 @@ public class BoMScreen extends Screen {
 				node.x += rOff;
 				nodes.add(node);
 			}
+		}
+
+		public static TreeVolume combineComparisonLanes(List<TreeVolume> volumes, int spacing) {
+			TreeVolume combined = null;
+			int laneWidth = 0;
+			for (TreeVolume volume : volumes) {
+				laneWidth = Math.max(laneWidth, volume.getMaxRight() - volume.getMinLeft());
+			}
+			int laneLeft = 0;
+			for (TreeVolume volume : volumes) {
+				int volumeWidth = volume.getMaxRight() - volume.getMinLeft();
+				int offset = laneLeft - volume.getMinLeft() + (laneWidth - volumeWidth) / 2;
+				for (int i = 0; i < volume.getDepth(); i++) {
+					volume.widths.get(i).left += offset;
+					volume.widths.get(i).right += offset;
+				}
+				for (Node node : volume.nodes) {
+					node.x += offset;
+				}
+				if (combined == null) {
+					combined = volume;
+				} else {
+					combined.mergeAligned(volume);
+				}
+				laneLeft += laneWidth + spacing;
+			}
+			return combined;
+		}
+
+		private void mergeAligned(TreeVolume other) {
+			for (int i = 0; i < other.getDepth(); i++) {
+				if (i < getDepth()) {
+					widths.get(i).left = Math.min(widths.get(i).left, other.getLeft(i));
+					widths.get(i).right = Math.max(widths.get(i).right, other.getRight(i));
+				} else {
+					widths.add(new Width(other.getLeft(i), other.getRight(i)));
+				}
+			}
+			nodes.addAll(other.nodes);
 		}
 
 		private static class Width {
