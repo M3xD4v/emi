@@ -282,7 +282,7 @@ public class BoMScreen extends Screen {
 	}
 
 	private int getLibraryRowHeight() {
-		return compactLibrary ? 36 : 54;
+		return compactLibrary ? 42 : 54;
 	}
 
 	private int getLibraryVisibleRows() {
@@ -304,7 +304,31 @@ public class BoMScreen extends Screen {
 	}
 
 	private Bounds getLibraryHeaderButton(Bounds panel) {
-		return new Bounds(panel.x() + panel.width() - 76, panel.y() + 8, 64, 18);
+		return new Bounds(panel.x() + panel.width() - 84, panel.y() + 7, 72, 18);
+	}
+
+	private LibraryRowButtons getLibraryRowButtons(Bounds row) {
+		int right = row.x() + row.width() - 10;
+		Bounds override = getLibraryButtonBounds(row, right, "Override");
+		right = override.x() - 6;
+		Bounds delete = getLibraryButtonBounds(row, right, "Delete");
+		right = delete.x() - 6;
+		Bounds rename = getLibraryButtonBounds(row, right, "Rename");
+		right = rename.x() - 6;
+		Bounds save = getLibraryButtonBounds(row, right, "Save");
+		return new LibraryRowButtons(save, rename, delete, override);
+	}
+
+	private Text trimLibraryText(String text, int width, Formatting formatting) {
+		if (width <= 8) {
+			return EmiPort.literal("", formatting);
+		}
+		String trimmed = textRenderer.trimToWidth(text, width);
+		if (trimmed.length() < text.length() && width > textRenderer.getWidth("...")) {
+			String ellipsis = "...";
+			trimmed = textRenderer.trimToWidth(text, Math.max(0, width - textRenderer.getWidth(ellipsis))) + ellipsis;
+		}
+		return EmiPort.literal(trimmed, formatting);
 	}
 
 	private void updateRenameField() {
@@ -337,6 +361,8 @@ public class BoMScreen extends Screen {
 	}
 
 	private void renderLibraryOverlay(EmiDrawContext context, DrawContext raw, int mouseX, int mouseY, float delta) {
+		context.push();
+		context.matrices().translate(0, 0, 500);
 		RenderSystem.disableDepthTest();
 		Bounds panel = getLibraryPanelBounds();
 		context.fill(panel.x() - 6, panel.y() - 6, panel.width() + 12, panel.height() + 12, 0x33000000);
@@ -345,9 +371,13 @@ public class BoMScreen extends Screen {
 		context.fill(panel.x(), panel.y(), panel.width(), 30, 0xFF1D2A38);
 		context.fill(panel.x(), panel.y() + 30, panel.width(), 1, 0xAA56738F);
 		context.drawTextWithShadow(EmiPort.literal("Recipe Tree Library", Formatting.WHITE), panel.x() + 12, panel.y() + 10, -1);
-		context.drawTextWithShadow(EmiPort.literal(compactLibrary ? "Compact" : "Comfort", Formatting.GRAY), panel.x() + 126, panel.y() + 10, -1);
 		renderLibraryAction(context, getLibraryHeaderButton(panel), compactLibrary ? "Comfort" : "Compact", true, mouseX, mouseY);
-		context.drawTextWithShadow(EmiPort.literal("Double-click to load", Formatting.DARK_GRAY), panel.x() + 208, panel.y() + 10, -1);
+		if (!compactLibrary) {
+			int hintWidth = getLibraryHeaderButton(panel).x() - (panel.x() + 150) - 8;
+			if (hintWidth > 40) {
+				context.drawTextWithShadow(trimLibraryText("Double-click to load", hintWidth, Formatting.DARK_GRAY), panel.x() + 150, panel.y() + 10, -1);
+			}
+		}
 		int rowHeight = getLibraryRowHeight();
 		int firstRow = Math.max(0, (int) Math.floor(libraryScroll));
 		float rowOffset = libraryScroll - firstRow;
@@ -368,32 +398,31 @@ public class BoMScreen extends Screen {
 			int card = hovered ? 0xFF243648 : selected ? 0xFF1E3143 : 0xCC18222D;
 			context.fill(row.x(), row.y(), row.width(), row.height(), card);
 			context.fill(row.x(), row.y(), 3, row.height(), saved.hasMissingData() ? 0xFFE46B6B : selected ? 0xFFD8C27A : 0xFF8AB7D6);
+			LibraryRowButtons buttons = getLibraryRowButtons(row);
+			int thumbX = row.x() + 10;
+			int thumbY = row.y() + row.height() / 2 - 8;
 			EmiIngredient thumbnail = saved.thumbnail == null ? EmiStack.EMPTY : saved.thumbnail;
 			if (!thumbnail.isEmpty()) {
-				thumbnail.render(raw, row.x() + 10, row.y() + row.height() / 2 - 8, delta, 0);
+				thumbnail.render(raw, thumbX, thumbY, delta, 0);
 			}
-			Text title = saved.isEmpty()
-				? EmiPort.literal((slot + 1) + ". Empty Slot", Formatting.DARK_GRAY)
-				: EmiPort.literal((slot + 1) + ". " + (saved.name.isBlank() ? getDefaultTreeName() : saved.name));
-			context.drawTextWithShadow(title, row.x() + 34, row.y() + (compactLibrary ? 6 : 9), -1);
+			int textX = thumbX + 24;
+			int textWidth = Math.max(40, buttons.save.x() - textX - 8);
+			String titleText = saved.isEmpty()
+				? (slot + 1) + ". Empty Slot"
+				: (slot + 1) + ". " + (saved.name.isBlank() ? getDefaultTreeName() : saved.name);
+			context.drawTextWithShadow(trimLibraryText(titleText, textWidth, saved.isEmpty() ? Formatting.DARK_GRAY : Formatting.WHITE),
+				textX, row.y() + (compactLibrary ? 8 : 9), -1);
 			if (saved.hasMissingData()) {
-				context.drawTextWithShadow(EmiPort.literal("Missing data", Formatting.RED), row.x() + 34, row.y() + (compactLibrary ? 18 : 29), -1);
+				context.drawTextWithShadow(trimLibraryText("Missing data", textWidth, Formatting.RED),
+					textX, row.y() + (compactLibrary ? 22 : 29), -1);
 			} else if (!compactLibrary) {
-				context.drawTextWithShadow(EmiPort.literal(saved.isEmpty() ? "Save current tree here" : "Stored tree snapshot", Formatting.DARK_GRAY), row.x() + 34, row.y() + 29, -1);
+				context.drawTextWithShadow(trimLibraryText(saved.isEmpty() ? "Save current tree here" : "Stored tree snapshot", textWidth, Formatting.DARK_GRAY),
+					textX, row.y() + 29, -1);
 			}
-
-			int right = row.x() + row.width() - 10;
-			Bounds override = getLibraryButtonBounds(row, right, "Override");
-			right = override.x() - 6;
-			Bounds delete = getLibraryButtonBounds(row, right, "Delete");
-			right = delete.x() - 6;
-			Bounds rename = getLibraryButtonBounds(row, right, "Rename");
-			right = rename.x() - 6;
-			Bounds save = getLibraryButtonBounds(row, right, "Save");
-			renderLibraryAction(context, save, "Save", canSaveToSlot(saved), mouseX, mouseY);
-			renderLibraryAction(context, rename, "Rename", !saved.isEmpty(), mouseX, mouseY);
-			renderLibraryAction(context, delete, "Delete", !saved.isEmpty(), mouseX, mouseY);
-			renderLibraryAction(context, override, "Override", canOverrideSlot(saved), mouseX, mouseY);
+			renderLibraryAction(context, buttons.save, "Save", canSaveToSlot(saved), mouseX, mouseY);
+			renderLibraryAction(context, buttons.rename, "Rename", !saved.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.delete, "Delete", !saved.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.override, "Override", canOverrideSlot(saved), mouseX, mouseY);
 		}
 		if (getLibraryMaxScroll() > 0) {
 			int trackX = panel.x() + panel.width() - 7;
@@ -407,6 +436,7 @@ public class BoMScreen extends Screen {
 			context.drawTextWithShadow(EmiPort.literal("Rename slot and press Enter", Formatting.GRAY), panel.x() + 12, panel.y() + panel.height() - 40, -1);
 		}
 		RenderSystem.enableDepthTest();
+		context.pop();
 	}
 
 	private void renderLibraryAction(EmiDrawContext context, Bounds bounds, String label, boolean active, int mouseX, int mouseY) {
@@ -462,33 +492,26 @@ public class BoMScreen extends Screen {
 			if (!row.contains((int) mouseX, (int) mouseY)) {
 				continue;
 			}
-			int right = row.x() + row.width() - 10;
-			Bounds override = getLibraryButtonBounds(row, right, "Override");
-			right = override.x() - 6;
-			Bounds delete = getLibraryButtonBounds(row, right, "Delete");
-			right = delete.x() - 6;
-			Bounds rename = getLibraryButtonBounds(row, right, "Rename");
-			right = rename.x() - 6;
-			Bounds save = getLibraryButtonBounds(row, right, "Save");
-			if (save.contains((int) mouseX, (int) mouseY) && canSaveToSlot(saved)) {
+			LibraryRowButtons buttons = getLibraryRowButtons(row);
+			if (buttons.save.contains((int) mouseX, (int) mouseY) && canSaveToSlot(saved)) {
 				saveTreeToSlot(slot, false);
 				selectedLibrarySlot = slot;
 				return true;
 			}
-			if (rename.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
+			if (buttons.rename.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
 				selectedLibrarySlot = slot;
 				renamingSlot = slot;
 				updateRenameField();
 				return true;
 			}
-			if (delete.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
+			if (buttons.delete.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
 				BoM.deleteSavedTree(slot);
 				selectedLibrarySlot = Math.min(slot, BoM.TREE_SLOT_COUNT - 1);
 				renamingSlot = -1;
 				updateRenameField();
 				return true;
 			}
-			if (override.contains((int) mouseX, (int) mouseY) && canOverrideSlot(saved)) {
+			if (buttons.override.contains((int) mouseX, (int) mouseY) && canOverrideSlot(saved)) {
 				saveTreeToSlot(slot, true);
 				selectedLibrarySlot = slot;
 				return true;
@@ -793,6 +816,9 @@ public class BoMScreen extends Screen {
 	}
 
 	private record NodePosition(int x, int y) {
+	}
+
+	private record LibraryRowButtons(Bounds save, Bounds rename, Bounds delete, Bounds override) {
 	}
 
 	private enum ContextAction {
