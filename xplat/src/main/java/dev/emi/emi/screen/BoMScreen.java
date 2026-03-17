@@ -150,9 +150,15 @@ public class BoMScreen extends Screen {
 	public void recalculateTree(String resetPath) {
 		help = new Bounds(width - 18, height - 18, 16, 16);
 		if (BoM.tree != null) {
-			Map<String, NodePosition> previousPositions = nodes.stream()
-				.filter(n -> resetPath == null || !n.path.startsWith(resetPath + "/"))
-				.collect(Collectors.toMap(n -> n.path, n -> new NodePosition(n.x, n.y, n.getStructureKey()), (a, b) -> b));
+			Map<String, NodePosition> previousPositions;
+			if (resetPath == null) {
+				previousPositions = nodes.stream()
+					.collect(Collectors.toMap(n -> n.path, n -> new NodePosition(n.x, n.y, n.getStructureKey()), (a, b) -> b));
+			} else {
+				// Structure changes must reflow the tree around the changed branch.
+				// Preserve only explicit saved offsets, not stale sibling positions.
+				previousPositions = Map.of();
+			}
 			TreeVolume volume = addNewNodes(BoM.tree.goal, BoM.tree.batches, 1, 0, ChanceState.DEFAULT, "0", -1, 0);
 			nodes = volume.nodes;
 			int horizontalOffset = (volume.getMaxRight() + volume.getMinLeft()) / 2;
