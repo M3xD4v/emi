@@ -20,6 +20,8 @@ public class MaterialNode {
 	public long divisor = 1;
 	public long remainderAmount = 0;
 	public boolean catalyst = false;
+	public boolean missing = false;
+	public @Nullable List<Comparison> comparisons = null;
 	// Should these be decoupled from material nodes?
 	public FoldState state = FoldState.EXPANDED;
 	public ProgressState progress = ProgressState.UNSTARTED;
@@ -54,6 +56,14 @@ public class MaterialNode {
 		this.remainderAmount = node.remainderAmount;
 	}
 
+	public boolean hasComparisons() {
+		return comparisons != null && !comparisons.isEmpty();
+	}
+
+	public void clearComparisons() {
+		comparisons = null;
+	}
+
 	public void recalculate(MaterialTree tree) {
 		recalculate(tree, Lists.newArrayList());
 	}
@@ -78,7 +88,11 @@ public class MaterialNode {
 
 	public void defineRecipe(EmiRecipe recipe) {
 		produceChance = 1;
+		missing = false;
 		if (recipe == null) {
+			this.recipe = null;
+			this.children = Lists.newArrayList();
+			this.divisor = 1;
 			return;
 		}
 		this.recipe = recipe;
@@ -118,6 +132,20 @@ public class MaterialNode {
 				node.consumeChance = i.getChance();
 				children.add(node);
 			}
+		}
+	}
+
+	public static class Comparison {
+		public final EmiRecipe recipe;
+		public final MaterialNode node;
+		public final long estimatedCost;
+		public boolean selected;
+
+		public Comparison(EmiRecipe recipe, MaterialNode node, long estimatedCost, boolean selected) {
+			this.recipe = recipe;
+			this.node = node;
+			this.estimatedCost = estimatedCost;
+			this.selected = selected;
 		}
 	}
 }

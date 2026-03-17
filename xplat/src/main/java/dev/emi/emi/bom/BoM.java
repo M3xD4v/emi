@@ -2,6 +2,7 @@ package dev.emi.emi.bom;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.IntStream;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -25,12 +26,15 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.JsonHelper;
 
 public class BoM {
+	public static final int TREE_SLOT_COUNT = 50;
 	private static RecipeDefaults defaults = new RecipeDefaults();
 	public static MaterialTree tree;
 	public static Map<EmiIngredient, EmiRecipe> defaultRecipes = Maps.newHashMap();
 	public static Map<EmiIngredient, EmiRecipe> addedRecipes = Maps.newHashMap();
 	public static Set<EmiRecipe> disabledRecipes = Sets.newHashSet();
 	public static boolean craftingMode = false;
+	public static java.util.List<SavedRecipeTree> savedTrees = IntStream.range(0, TREE_SLOT_COUNT)
+		.mapToObj(SavedRecipeTree::empty).collect(java.util.stream.Collectors.toList());
 
 	public static void setDefaults(RecipeDefaults defaults) {
 		BoM.defaults = defaults;
@@ -87,6 +91,16 @@ public class BoM {
 		return obj;
 	}
 
+	public static JsonArray saveTrees() {
+		JsonArray arr = new JsonArray();
+		for (SavedRecipeTree tree : savedTrees) {
+			if (!tree.isEmpty()) {
+				arr.add(tree.save());
+			}
+		}
+		return arr;
+	}
+
 	public static void loadAdded(JsonObject object) {
 		addedRecipes.clear();
 		disabledRecipes.clear();
@@ -130,6 +144,18 @@ public class BoM {
 		}
 	}
 
+	public static void loadTrees(JsonArray array) {
+		savedTrees = IntStream.range(0, TREE_SLOT_COUNT).mapToObj(SavedRecipeTree::empty).collect(java.util.stream.Collectors.toList());
+		for (JsonElement el : array) {
+			if (el.isJsonObject()) {
+				SavedRecipeTree tree = SavedRecipeTree.load(el.getAsJsonObject());
+				if (tree.slot >= 0 && tree.slot < savedTrees.size()) {
+					savedTrees.set(tree.slot, tree);
+				}
+			}
+		}
+	}
+
 	public static void reload() {
 		defaultRecipes = defaults.bake();
 	}
@@ -168,6 +194,51 @@ public class BoM {
 	public static void setGoal(EmiRecipe recipe) {
 		tree = new MaterialTree(recipe);
 		craftingMode = false;
+	}
+
+	public static SavedRecipeTree getSavedTree(int slot) {
+		if (slot < 0 || slot >= savedTrees.size()) {
+			return SavedRecipeTree.empty(slot);
+		}
+		return savedTrees.get(slot);
+	}
+
+	public static void saveTree(int slot, SavedRecipeTree tree) {
+		if (slot < 0 || slot >= savedTrees.size()) {
+			return;
+		}
+		savedTrees.set(slot, tree);
+		EmiPersistentData.save();
+	}
+
+	public static void renameSavedTree(int slot, String name) {
+		if (slot < 0 || slot >= savedTrees.size()) {
+			return;
+		}
+		SavedRecipeTree tree = savedTrees.get(slot);
+		if (!tree.isEmpty()) {
+			tree.name = name;
+			EmiPersistentData.save();
+		}
+	}
+
+	public static void deleteSavedTree(int slot) {
+		if (slot < 0 || slot >= savedTrees.size()) {
+			return;
+		}
+		savedTrees.set(slot, SavedRecipeTree.empty(slot));
+		EmiPersistentData.save();
+	}
+
+	public static SavedRecipeTree.LoadResult loadSavedTree(int slot) {
+		if (slot < 0 || slot >= savedTrees.size()) {
+			return new SavedRecipeTree.LoadResult(false, false);
+		}
+		SavedRecipeTree tree = savedTrees.get(slot);
+		if (tree.snapshot == null) {
+			return new SavedRecipeTree.LoadResult(false, false);
+		}
+		return tree.snapshot.loadIntoBoM();
 	}
 
 	public static void addResolution(EmiIngredient ingredient, EmiRecipe recipe) {

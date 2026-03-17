@@ -1,6 +1,7 @@
 package dev.emi.emi.bom;
 
 import java.util.Map;
+import java.util.stream.Stream;
 
 import com.google.common.collect.Maps;
 
@@ -13,13 +14,21 @@ public class MaterialTree {
 	public MaterialNode goal;
 	public TreeCost cost = new TreeCost();
 	public Map<EmiIngredient, EmiRecipe> resolutions = Maps.newHashMap();
+	public Map<String, NodeOffset> nodeOffsets = Maps.newHashMap();
 	public long batches = 1;
+	public double snapshotOffX = Double.NaN;
+	public double snapshotOffY = Double.NaN;
+	public int snapshotZoom = Integer.MIN_VALUE;
 
 	public MaterialTree(EmiRecipe recipe) {
 		EmiStack output = recipe.getOutputs().get(0);
 		goal = new MaterialNode(output);
 		goal.defineRecipe(recipe);
 		recalculate();
+	}
+
+	public MaterialTree(MaterialNode goal) {
+		this.goal = goal;
 	}
 
 	public EmiRecipe getRecipe(EmiIngredient stack) {
@@ -49,5 +58,27 @@ public class MaterialTree {
 
 	public void calculateCost() {
 		cost.calculate(goal, batches);
+	}
+
+	public MaterialNode createComparisonNode(MaterialNode source, EmiRecipe recipe) {
+		MaterialNode goal = new MaterialNode(source.ingredient.copy().setAmount(source.amount));
+		goal.state = FoldState.EXPANDED;
+		goal.defineRecipe(recipe);
+		MaterialTree branch = new MaterialTree(goal);
+		branch.batches = batches;
+		branch.resolutions.putAll(resolutions);
+		branch.recalculate();
+		return branch.goal;
+	}
+
+	public long estimateCost(MaterialNode node) {
+		TreeCost cost = new TreeCost();
+		cost.calculate(node, batches);
+		return Stream.concat(cost.costs.values().stream(), cost.chanceCosts.values().stream())
+			.mapToLong(FlatMaterialCost::getEffectiveAmount)
+			.sum();
+	}
+
+	public static record NodeOffset(int x, int y) {
 	}
 }

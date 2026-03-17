@@ -2,6 +2,7 @@ package dev.emi.emi.screen;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Comparator;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -30,7 +31,9 @@ import dev.emi.emi.bom.ChanceState;
 import dev.emi.emi.bom.FlatMaterialCost;
 import dev.emi.emi.bom.FoldState;
 import dev.emi.emi.bom.MaterialNode;
+import dev.emi.emi.bom.MaterialTree;
 import dev.emi.emi.bom.ProgressState;
+import dev.emi.emi.bom.SavedRecipeTree;
 import dev.emi.emi.bom.TreeCost;
 import dev.emi.emi.config.EmiConfig;
 import dev.emi.emi.data.EmiRecipeCategoryProperties;
@@ -40,7 +43,7 @@ import dev.emi.emi.registry.EmiStackList;
 import dev.emi.emi.runtime.EmiDrawContext;
 import dev.emi.emi.runtime.EmiFavorites;
 import dev.emi.emi.runtime.EmiHistory;
-import dev.emi.emi.screen.StackBatcher.Batchable;
+import dev.emi.emi.screen.MicroTextRenderer;
 import dev.emi.emi.screen.tooltip.EmiTooltip;
 import dev.emi.emi.screen.tooltip.RecipeTooltipComponent;
 import net.minecraft.client.MinecraftClient;
@@ -48,6 +51,8 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.tooltip.TooltipComponent;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
@@ -62,7 +67,6 @@ public class BoMScreen extends Screen {
 	private static final int NODE_HORIZONTAL_SPACING = 8;
 	private static final int NODE_VERTICAL_SPACING = 20;
 	private static final int COST_HORIZONTAL_SPACING = 8;
-	private static StackBatcher batcher = new StackBatcher();
 	private static int zoom = 0;
 	private Bounds batches = new Bounds(-24, -50, 48, 26);
 	private Bounds mode = new Bounds(-24, -50, 16, 16);
@@ -70,6 +74,7 @@ public class BoMScreen extends Screen {
 	private double offX, offY;
 	private List<Node> nodes = Lists.newArrayList();
 	private List<Cost> costs = Lists.newArrayList();
+	private ButtonWidget libraryButton;
 	private EmiPlayerInventory playerInv;
 	private boolean hasRemainders = false;;
 	public HandledScreen<?> old;
@@ -77,6 +82,20 @@ public class BoMScreen extends Screen {
 	private int nodeHeight = 0;
 	private int lastMouseX, lastMouseY;
 	private double scrollAcc = 0;
+	private Node draggedNode;
+	private boolean draggingBranch = false;
+	private int dragLastTreeX;
+	private int dragLastTreeY;
+	private boolean loadWarning = false;
+	private boolean libraryOpen = false;
+	private float libraryScroll = 0;
+	private float libraryScrollTarget = 0;
+	private int selectedLibrarySlot = -1;
+	private boolean compactLibrary = false;
+	private int renamingSlot = -1;
+	private TextFieldWidget renameField;
+	private long lastLibraryClickTime = 0;
+	private int lastLibraryClickSlot = -1;
 
 	public BoMScreen(HandledScreen<?> old) {
 		super(EmiPort.translatable("screen.emi.recipe_tree"));
@@ -84,8 +103,30 @@ public class BoMScreen extends Screen {
 	}
 
 	public void init() {
+		this.clearChildren();
+		libraryButton = EmiPort.newButton(width - 110, 8, 102, 20, EmiPort.literal("Tree Library"), button -> {
+			libraryOpen = !libraryOpen;
+			renamingSlot = -1;
+			libraryScrollTarget = MathHelper.clamp(libraryScrollTarget, 0, getLibraryMaxScroll());
+			libraryScroll = MathHelper.clamp(libraryScroll, 0, getLibraryMaxScroll());
+			updateRenameField();
+		});
+		this.addDrawableChild(libraryButton);
+		renameField = new TextFieldWidget(textRenderer, 0, 0, 180, 18, EmiPort.literal(""));
+		renameField.setMaxLength(64);
+		renameField.setVisible(false);
+		this.addDrawableChild(renameField);
 		if (BoM.tree != null) {
-			offY = height / -3;
+			if (!Double.isNaN(BoM.tree.snapshotOffX) && !Double.isNaN(BoM.tree.snapshotOffY)) {
+				offX = BoM.tree.snapshotOffX;
+				offY = BoM.tree.snapshotOffY;
+				zoom = BoM.tree.snapshotZoom == Integer.MIN_VALUE ? zoom : BoM.tree.snapshotZoom;
+				BoM.tree.snapshotOffX = Double.NaN;
+				BoM.tree.snapshotOffY = Double.NaN;
+				BoM.tree.snapshotZoom = Integer.MIN_VALUE;
+			} else if (offX == 0 && offY == 0) {
+				offY = height / -3;
+			}
 		} else {
 			offY = 0;
 		}
@@ -95,12 +136,13 @@ public class BoMScreen extends Screen {
 	public void recalculateTree() {
 		help = new Bounds(width - 18, height - 18, 16, 16);
 		if (BoM.tree != null) {
-			TreeVolume volume = addNewNodes(BoM.tree.goal, BoM.tree.batches, 1, 0, ChanceState.DEFAULT);
+			TreeVolume volume = addNewNodes(BoM.tree.goal, BoM.tree.batches, 1, 0, ChanceState.DEFAULT, "0", -1, 0);
 			nodes = volume.nodes;
 			int horizontalOffset = (volume.getMaxRight() + volume.getMinLeft()) / 2;
 			for (Node node : volume.nodes) {
 				node.x -= horizontalOffset;
 			}
+			applyNodeOffsets();
 			if (!volume.nodes.isEmpty()) {
 				Node node = volume.nodes.get(0);
 				int width = textRenderer.getWidth("x" + BoM.tree.batches);
@@ -186,7 +228,266 @@ public class BoMScreen extends Screen {
 		} else {
 			nodes = Lists.newArrayList();
 		}
-		batcher.repopulate();
+	}
+
+	private void applyNodeOffsets() {
+		if (BoM.tree == null) {
+			return;
+		}
+		for (Node node : nodes) {
+			MaterialTree.NodeOffset offset = BoM.tree.nodeOffsets.get(node.path);
+			if (offset != null) {
+				node.x += offset.x();
+				node.y += offset.y();
+			}
+		}
+	}
+
+	private Bounds getLibraryPanelBounds() {
+		int panelWidth = Math.min(compactLibrary ? 340 : 430, width - 24);
+		int panelHeight = Math.min(height - 56, compactLibrary ? 314 : 392);
+		return new Bounds(width - panelWidth - 12, 36, panelWidth, panelHeight);
+	}
+
+	private int getLibraryRowHeight() {
+		return compactLibrary ? 36 : 54;
+	}
+
+	private int getLibraryVisibleRows() {
+		return Math.max(1, (getLibraryPanelBounds().height() - 78) / getLibraryRowHeight() + 1);
+	}
+
+	private int getLibraryMaxScroll() {
+		return Math.max(0, BoM.TREE_SLOT_COUNT - getLibraryVisibleRows());
+	}
+
+	private Bounds getLibraryRowBounds(Bounds panel, int visibleIndex) {
+		return new Bounds(panel.x() + 12, panel.y() + 40 + visibleIndex * getLibraryRowHeight(), panel.width() - 24, getLibraryRowHeight() - 6);
+	}
+
+	private Bounds getLibraryButtonBounds(Bounds row, int right, String label) {
+		int width = Math.max(compactLibrary ? 36 : 44, textRenderer.getWidth(label) + (compactLibrary ? 10 : 16));
+		int height = compactLibrary ? 16 : 18;
+		return new Bounds(right - width, row.y() + row.height() / 2 - height / 2, width, height);
+	}
+
+	private Bounds getLibraryHeaderButton(Bounds panel) {
+		return new Bounds(panel.x() + panel.width() - 76, panel.y() + 8, 64, 18);
+	}
+
+	private void updateRenameField() {
+		if (renameField == null) {
+			return;
+		}
+		boolean wasVisible = renameField.isVisible();
+		if (!libraryOpen || renamingSlot < 0 || renamingSlot >= BoM.TREE_SLOT_COUNT) {
+			renameField.setVisible(false);
+			renameField.setFocused(false);
+			return;
+		}
+		Bounds panel = getLibraryPanelBounds();
+		renameField.setVisible(true);
+		renameField.setX(panel.x() + 12);
+		renameField.setY(panel.y() + panel.height() - 26);
+		renameField.setWidth(panel.width() - 24);
+		if (!wasVisible) {
+			renameField.setText(BoM.getSavedTree(renamingSlot).name);
+			renameField.setFocused(true);
+		}
+	}
+
+	private void commitRename() {
+		if (renamingSlot >= 0 && renameField != null) {
+			BoM.renameSavedTree(renamingSlot, renameField.getText().trim());
+		}
+		renamingSlot = -1;
+		updateRenameField();
+	}
+
+	private void renderLibraryOverlay(EmiDrawContext context, DrawContext raw, int mouseX, int mouseY, float delta) {
+		RenderSystem.disableDepthTest();
+		Bounds panel = getLibraryPanelBounds();
+		context.fill(panel.x() - 6, panel.y() - 6, panel.width() + 12, panel.height() + 12, 0x33000000);
+		context.fill(panel.x() - 1, panel.y() - 1, panel.width() + 2, panel.height() + 2, 0x99354B63);
+		context.fill(panel.x(), panel.y(), panel.width(), panel.height(), 0xF1141B24);
+		context.fill(panel.x(), panel.y(), panel.width(), 30, 0xFF1D2A38);
+		context.fill(panel.x(), panel.y() + 30, panel.width(), 1, 0xAA56738F);
+		context.drawTextWithShadow(EmiPort.literal("Recipe Tree Library", Formatting.WHITE), panel.x() + 12, panel.y() + 10, -1);
+		context.drawTextWithShadow(EmiPort.literal(compactLibrary ? "Compact" : "Comfort", Formatting.GRAY), panel.x() + 126, panel.y() + 10, -1);
+		renderLibraryAction(context, getLibraryHeaderButton(panel), compactLibrary ? "Comfort" : "Compact", true, mouseX, mouseY);
+		context.drawTextWithShadow(EmiPort.literal("Double-click to load", Formatting.DARK_GRAY), panel.x() + 208, panel.y() + 10, -1);
+		int rowHeight = getLibraryRowHeight();
+		int firstRow = Math.max(0, (int) Math.floor(libraryScroll));
+		float rowOffset = libraryScroll - firstRow;
+		int visibleRows = getLibraryVisibleRows();
+		for (int i = 0; i < visibleRows + 1; i++) {
+			int slot = firstRow + i;
+			if (slot >= BoM.TREE_SLOT_COUNT) {
+				break;
+			}
+			SavedRecipeTree saved = BoM.getSavedTree(slot);
+			Bounds row = getLibraryRowBounds(panel, i);
+			row = new Bounds(row.x(), row.y() - Math.round(rowOffset * rowHeight), row.width(), row.height());
+			if (row.y() + row.height() < panel.y() + 32 || row.y() > panel.y() + panel.height() - 40) {
+				continue;
+			}
+			boolean hovered = row.contains(mouseX, mouseY);
+			boolean selected = selectedLibrarySlot == slot;
+			int card = hovered ? 0xFF243648 : selected ? 0xFF1E3143 : 0xCC18222D;
+			context.fill(row.x(), row.y(), row.width(), row.height(), card);
+			context.fill(row.x(), row.y(), 3, row.height(), saved.hasMissingData() ? 0xFFE46B6B : selected ? 0xFFD8C27A : 0xFF8AB7D6);
+			EmiIngredient thumbnail = saved.thumbnail == null ? EmiStack.EMPTY : saved.thumbnail;
+			if (!thumbnail.isEmpty()) {
+				thumbnail.render(raw, row.x() + 10, row.y() + row.height() / 2 - 8, delta, 0);
+			}
+			Text title = saved.isEmpty()
+				? EmiPort.literal((slot + 1) + ". Empty Slot", Formatting.DARK_GRAY)
+				: EmiPort.literal((slot + 1) + ". " + (saved.name.isBlank() ? getDefaultTreeName() : saved.name));
+			context.drawTextWithShadow(title, row.x() + 34, row.y() + (compactLibrary ? 6 : 9), -1);
+			if (saved.hasMissingData()) {
+				context.drawTextWithShadow(EmiPort.literal("Missing data", Formatting.RED), row.x() + 34, row.y() + (compactLibrary ? 18 : 29), -1);
+			} else if (!compactLibrary) {
+				context.drawTextWithShadow(EmiPort.literal(saved.isEmpty() ? "Save current tree here" : "Stored tree snapshot", Formatting.DARK_GRAY), row.x() + 34, row.y() + 29, -1);
+			}
+
+			int right = row.x() + row.width() - 10;
+			Bounds override = getLibraryButtonBounds(row, right, "Override");
+			right = override.x() - 6;
+			Bounds delete = getLibraryButtonBounds(row, right, "Delete");
+			right = delete.x() - 6;
+			Bounds rename = getLibraryButtonBounds(row, right, "Rename");
+			right = rename.x() - 6;
+			Bounds save = getLibraryButtonBounds(row, right, "Save");
+			renderLibraryAction(context, save, "Save", canSaveToSlot(saved), mouseX, mouseY);
+			renderLibraryAction(context, rename, "Rename", !saved.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, delete, "Delete", !saved.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, override, "Override", canOverrideSlot(saved), mouseX, mouseY);
+		}
+		if (getLibraryMaxScroll() > 0) {
+			int trackX = panel.x() + panel.width() - 7;
+			int trackHeight = panel.height() - 82;
+			context.fill(trackX, panel.y() + 40, 3, trackHeight, 0x55273A4D);
+			int thumbHeight = Math.max(20, trackHeight * getLibraryVisibleRows() / BoM.TREE_SLOT_COUNT);
+			int thumbY = panel.y() + 40 + Math.round((trackHeight - thumbHeight) * (libraryScroll / Math.max(1, getLibraryMaxScroll())));
+			context.fill(trackX, thumbY, 3, thumbHeight, 0xFFC7D8E8);
+		}
+		if (renameField != null && renameField.isVisible()) {
+			context.drawTextWithShadow(EmiPort.literal("Rename slot and press Enter", Formatting.GRAY), panel.x() + 12, panel.y() + panel.height() - 40, -1);
+		}
+		RenderSystem.enableDepthTest();
+	}
+
+	private void renderLibraryAction(EmiDrawContext context, Bounds bounds, String label, boolean active, int mouseX, int mouseY) {
+		int color = active ? (bounds.contains(mouseX, mouseY) ? 0xFF7BA7D0 : 0xFF36506A) : 0xFF26303A;
+		context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), color);
+		context.fill(bounds.x(), bounds.y(), bounds.width(), 1, active ? 0x55FFFFFF : 0x33111111);
+		context.drawCenteredText(EmiPort.literal(label, active ? Formatting.WHITE : Formatting.DARK_GRAY),
+			bounds.x() + bounds.width() / 2, bounds.y() + (compactLibrary ? 4 : 5));
+	}
+
+	private boolean canSaveToSlot(SavedRecipeTree slot) {
+		return slot.isEmpty() && createSnapshot() != null;
+	}
+
+	private boolean canOverrideSlot(SavedRecipeTree slot) {
+		return !slot.isEmpty() && createSnapshot() != null;
+	}
+
+	private boolean handleLibraryClick(double mouseX, double mouseY, int button) {
+		if (!libraryOpen || button != 0) {
+			return false;
+		}
+		Bounds panel = getLibraryPanelBounds();
+		if (!panel.contains((int) mouseX, (int) mouseY)) {
+			renamingSlot = -1;
+			updateRenameField();
+			return false;
+		}
+		if (renameField != null && renameField.isVisible()
+			&& mouseX >= renameField.getX() && mouseX < renameField.getX() + renameField.getWidth()
+			&& mouseY >= renameField.getY() && mouseY < renameField.getY() + renameField.getHeight()) {
+			return false;
+		}
+		if (getLibraryHeaderButton(panel).contains((int) mouseX, (int) mouseY)) {
+			compactLibrary = !compactLibrary;
+			libraryScrollTarget = MathHelper.clamp(libraryScrollTarget, 0, getLibraryMaxScroll());
+			libraryScroll = MathHelper.clamp(libraryScroll, 0, getLibraryMaxScroll());
+			updateRenameField();
+			return true;
+		}
+		int rowHeight = getLibraryRowHeight();
+		int firstRow = Math.max(0, (int) Math.floor(libraryScroll));
+		float rowOffset = libraryScroll - firstRow;
+		int visibleRows = getLibraryVisibleRows();
+		for (int i = 0; i < visibleRows + 1; i++) {
+			int slot = firstRow + i;
+			if (slot >= BoM.TREE_SLOT_COUNT) {
+				break;
+			}
+			SavedRecipeTree saved = BoM.getSavedTree(slot);
+			Bounds row = getLibraryRowBounds(panel, i);
+			row = new Bounds(row.x(), row.y() - Math.round(rowOffset * rowHeight), row.width(), row.height());
+			if (!row.contains((int) mouseX, (int) mouseY)) {
+				continue;
+			}
+			int right = row.x() + row.width() - 10;
+			Bounds override = getLibraryButtonBounds(row, right, "Override");
+			right = override.x() - 6;
+			Bounds delete = getLibraryButtonBounds(row, right, "Delete");
+			right = delete.x() - 6;
+			Bounds rename = getLibraryButtonBounds(row, right, "Rename");
+			right = rename.x() - 6;
+			Bounds save = getLibraryButtonBounds(row, right, "Save");
+			if (save.contains((int) mouseX, (int) mouseY) && canSaveToSlot(saved)) {
+				saveTreeToSlot(slot, false);
+				selectedLibrarySlot = slot;
+				return true;
+			}
+			if (rename.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
+				selectedLibrarySlot = slot;
+				renamingSlot = slot;
+				updateRenameField();
+				return true;
+			}
+			if (delete.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
+				BoM.deleteSavedTree(slot);
+				selectedLibrarySlot = Math.min(slot, BoM.TREE_SLOT_COUNT - 1);
+				renamingSlot = -1;
+				updateRenameField();
+				return true;
+			}
+			if (override.contains((int) mouseX, (int) mouseY) && canOverrideSlot(saved)) {
+				saveTreeToSlot(slot, true);
+				selectedLibrarySlot = slot;
+				return true;
+			}
+			long now = System.currentTimeMillis();
+			selectedLibrarySlot = slot;
+			if (!saved.isEmpty() && lastLibraryClickSlot == slot && now - lastLibraryClickTime < 250) {
+				SavedRecipeTree.LoadResult result = BoM.loadSavedTree(slot);
+				if (result.loaded) {
+					applyLoadedTree(result.missingData);
+				}
+			}
+			lastLibraryClickSlot = slot;
+			lastLibraryClickTime = now;
+			return true;
+		}
+		return true;
+	}
+
+	private void saveTreeToSlot(int slot, boolean override) {
+		SavedRecipeTree existing = BoM.getSavedTree(slot);
+		if (!override && !existing.isEmpty()) {
+			return;
+		}
+		SavedRecipeTree.RecipeTreeSnapshot snapshot = createSnapshot();
+		if (snapshot == null) {
+			return;
+		}
+		String name = existing.isEmpty() ? getDefaultTreeName() : existing.name;
+		BoM.saveTree(slot, new SavedRecipeTree(slot, name, getTreeThumbnail(), snapshot));
+		selectedLibrarySlot = slot;
 	}
 
 	@Override
@@ -217,7 +518,6 @@ public class BoMScreen extends Screen {
 		view.translate(offX, offY, 0);
 		EmiPort.applyModelViewMatrix();
 		if (BoM.tree != null) {
-			batcher.begin(0, 0, 0);
 			int cy = nodeHeight * NODE_VERTICAL_SPACING * 2;
 			context.drawCenteredText(EmiPort.translatable("emi.total_cost"), 0, cy - 16);
 			if (hasRemainders) {
@@ -241,7 +541,6 @@ public class BoMScreen extends Screen {
 			}
 			context.drawTexture(EmiRenderHelper.WIDGETS, mode.x(), mode.y(), BoM.craftingMode ? 16 : 0, 146, mode.width(), mode.height());
 			context.setColor(1f, 1f, 1f, 1f);
-			batcher.draw();
 		} else {
 			context.drawCenteredText(EmiPort.translatable("emi.tree_welcome", EmiRenderHelper.getEmiText()), 0, -72);
 			context.drawCenteredText(EmiPort.translatable("emi.no_tree"), 0, -48);
@@ -257,6 +556,18 @@ public class BoMScreen extends Screen {
 		}
 		context.drawTexture(EmiRenderHelper.WIDGETS, help.x(), help.y(), 0, 200, help.width(), help.height());
 		context.setColor(1f, 1f, 1f, 1f);
+		if (loadWarning) {
+			context.drawTextWithShadow(EmiPort.literal("Loaded recipe tree with missing data", Formatting.YELLOW), 8, 34, -1);
+		}
+		if (libraryOpen) {
+			libraryScroll += (libraryScrollTarget - libraryScroll) * 0.35f;
+			if (Math.abs(libraryScrollTarget - libraryScroll) < 0.01f) {
+				libraryScroll = libraryScrollTarget;
+			}
+			updateRenameField();
+			renderLibraryOverlay(context, raw, mouseX, mouseY, delta);
+		}
+		super.render(raw, mouseX, mouseY, delta);
 
 		Hover hover = getHoveredStack(mouseX, mouseY);
 		if (hover != null) {
@@ -295,6 +606,13 @@ public class BoMScreen extends Screen {
 	}
 
 	public int getNodeHeight(MaterialNode node) {
+		if (node.hasComparisons()) {
+			int i = 1;
+			for (MaterialNode.Comparison comparison : node.comparisons) {
+				i = Math.max(i, getNodeHeight(comparison.node));
+			}
+			return i + 1;
+		}
 		if (node.recipe != null && node.state == FoldState.EXPANDED) {
 			int i = 1;
 			for (MaterialNode n : node.children) {
@@ -308,33 +626,76 @@ public class BoMScreen extends Screen {
 		return 1;
 	}
 
-	public TreeVolume addNewNodes(MaterialNode node, long multiplier, long divisor, int depth, ChanceState chance) {
+	public TreeVolume addNewNodes(MaterialNode node, long multiplier, long divisor, int depth, ChanceState chance, String path, int outlineColor, int colorSeed) {
 		if (node.catalyst) {
 			multiplier = node.amount;
 		} else {
 			multiplier = node.amount * (int) Math.ceil(multiplier / (float) divisor);
 		}
-		if (node.recipe != null && node.children.size() > 0 && node.state == FoldState.EXPANDED) {
-			ChanceState produced = chance.produce(node.produceChance);
-			if (node.recipe instanceof EmiResolutionRecipe) {
-				TreeVolume volume = addNewNodes(node.children.get(0), multiplier, node.divisor, depth, produced);
-				volume.nodes.get(0).resolution = node;
-				return volume;
-			}
+		if (node.hasComparisons()) {
 			TreeVolume left = null;
-			for (int i = 0; i < node.children.size(); i++) {
-				ChanceState consumed = produced.consume(node.children.get(i).consumeChance);
-				TreeVolume volume = addNewNodes(node.children.get(i), multiplier, node.divisor, depth + 1, consumed);
+			for (int i = 0; i < node.comparisons.size(); i++) {
+				MaterialNode.Comparison comparison = node.comparisons.get(i);
+				int childColor = getBranchColor(path + "/cmp", i, colorSeed);
+				TreeVolume volume = addNewNodes(comparison.node, multiplier, comparison.node.divisor, depth + 1, chance,
+					path + "/@cmp/" + i, childColor, colorSeed + i + 1);
+				if (!volume.nodes.isEmpty()) {
+					volume.nodes.get(0).comparisonCandidate = true;
+					volume.nodes.get(0).compareOwner = node;
+					volume.nodes.get(0).comparisonCost = comparison.estimatedCost;
+					volume.nodes.get(0).comparisonSelected = comparison.selected;
+				}
 				if (left == null) {
 					left = volume;
 				} else {
 					left.addToRight(volume);
 				}
 			}
-			left.addHead(node, multiplier, depth * NODE_VERTICAL_SPACING, chance);
+			if (left != null) {
+				left.addHead(node, multiplier, depth * NODE_VERTICAL_SPACING, chance, path, outlineColor);
+				if (!left.nodes.isEmpty()) {
+					left.nodes.get(0).comparisonHead = true;
+				}
+				return left;
+			}
+		}
+		if (node.recipe != null && node.children.size() > 0 && node.state == FoldState.EXPANDED) {
+			ChanceState produced = chance.produce(node.produceChance);
+			if (node.recipe instanceof EmiResolutionRecipe) {
+				TreeVolume volume = addNewNodes(node.children.get(0), multiplier, node.divisor, depth, produced, path + "/0", outlineColor, colorSeed);
+				volume.nodes.get(0).resolution = node;
+				return volume;
+			}
+			TreeVolume left = null;
+			for (int i = 0; i < node.children.size(); i++) {
+				ChanceState consumed = produced.consume(node.children.get(i).consumeChance);
+				int childColor = getBranchColor(path, i, colorSeed);
+				TreeVolume volume = addNewNodes(node.children.get(i), multiplier, node.divisor, depth + 1, consumed, path + "/" + i, childColor, colorSeed + i + 1);
+				if (left == null) {
+					left = volume;
+				} else {
+					left.addToRight(volume);
+				}
+			}
+			left.addHead(node, multiplier, depth * NODE_VERTICAL_SPACING, chance, path, outlineColor);
 			return left;
 		}
-		return new TreeVolume(node, multiplier, depth * NODE_VERTICAL_SPACING, chance);
+		return new TreeVolume(node, multiplier, depth * NODE_VERTICAL_SPACING, chance, path, outlineColor);
+	}
+
+	private int getBranchColor(String path, int childIndex, int seed) {
+		int[] palette = {
+			0xFFF2B5D4,
+			0xFFBEE3DB,
+			0xFFF7D6A3,
+			0xFFD0C7F2,
+			0xFFF3C4A7,
+			0xFFC1D7F0,
+			0xFFCDE7B0,
+			0xFFF1BFCB
+		};
+		int hash = Math.abs(path.hashCode() + seed * 31 + childIndex * 17);
+		return palette[hash % palette.length];
 	}
 
 	private static void drawLine(EmiDrawContext context, int x1, int y1, int x2, int y2) {
@@ -362,7 +723,29 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+		if (renameField != null && renameField.isVisible()) {
+			if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+				commitRename();
+				return true;
+			} else if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+				renamingSlot = -1;
+				updateRenameField();
+				return true;
+			}
+		}
+		if (libraryOpen && keyCode == GLFW.GLFW_KEY_TAB) {
+			libraryOpen = false;
+			renamingSlot = -1;
+			updateRenameField();
+			return true;
+		}
 		if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+			if (libraryOpen) {
+				libraryOpen = false;
+				renamingSlot = -1;
+				updateRenameField();
+				return true;
+			}
 			this.close();
 			return true;
 		} else if (this.client.options.inventoryKey.matchesKey(keyCode, scanCode)) {
@@ -431,13 +814,82 @@ public class BoMScreen extends Screen {
 		return false;
 	}
 
+	private boolean toggleComparison(MaterialNode node) {
+		if (BoM.tree == null || node == null || node.ingredient.getEmiStacks().size() != 1) {
+			return false;
+		}
+		if (node.hasComparisons()) {
+			node.clearComparisons();
+			return true;
+		}
+		EmiStack stack = node.ingredient.getEmiStacks().get(0);
+		List<EmiRecipe> recipes = EmiApi.getRecipeManager().getRecipesByOutput(stack).stream()
+			.filter(EmiRecipe::supportsRecipeTree)
+			.filter(r -> r.getOutputs().stream().anyMatch(o -> o.isEqual(stack)))
+			.distinct()
+			.toList();
+		if (recipes.size() <= 1) {
+			return false;
+		}
+		EmiRecipe selected = node.recipe;
+		node.comparisons = recipes.stream()
+			.map(r -> {
+				MaterialNode comparisonNode = BoM.tree.createComparisonNode(node, r);
+				long estimatedCost = BoM.tree.estimateCost(comparisonNode);
+				boolean isSelected = selected != null && selected.equals(r);
+				return new MaterialNode.Comparison(r, comparisonNode, estimatedCost, isSelected);
+			})
+			.sorted(Comparator
+				.comparingLong((MaterialNode.Comparison c) -> c.estimatedCost)
+				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory())))
+			.collect(Collectors.toList());
+		if (node.comparisons.stream().noneMatch(c -> c.selected) && !node.comparisons.isEmpty()) {
+			node.comparisons.get(0).selected = true;
+		}
+		return true;
+	}
+
+	private boolean selectComparison(MaterialNode compareOwner, EmiRecipe recipe) {
+		if (BoM.tree == null || compareOwner == null || recipe == null) {
+			return false;
+		}
+		BoM.tree.addResolution(compareOwner.ingredient, recipe);
+		compareOwner.clearComparisons();
+		return true;
+	}
+
 	@Override
 	public boolean mouseClicked(double mouseX, double mouseY, int button) {
+		if (handleLibraryClick(mouseX, mouseY, button)) {
+			return true;
+		}
 		Hover hover = getHoveredStack((int) mouseX, (int) mouseY);
 		float scale = getScale();
 		int mx = (int) ((mouseX - width / 2) / scale - offX);
 		int my = (int) ((mouseY - height / 2) / scale - offY);
+		if (button == 2 && EmiInput.isControlDown() && hover != null && hover.node != null) {
+			for (Node node : nodes) {
+				if (node.node == hover.node) {
+					draggedNode = node;
+					draggingBranch = EmiInput.isShiftDown();
+					dragLastTreeX = mx;
+					dragLastTreeY = my;
+					return true;
+				}
+			}
+		}
 		if (hover != null) {
+			if (button == 0 && EmiInput.isControlDown() && EmiInput.isShiftDown() && hover.node != null) {
+				if (hover.renderNode != null && hover.renderNode.comparisonCandidate) {
+					if (selectComparison(hover.renderNode.compareOwner, hover.node.recipe)) {
+						recalculateTree();
+						return true;
+					}
+				} else if (toggleComparison(hover.node)) {
+					recalculateTree();
+					return true;
+				}
+			}
 			if (button == 1 && hover.node != null && hover.node.recipe != null) {
 				if (EmiInput.isShiftDown()) {
 					BoM.tree.addResolution(hover.node.ingredient, null);
@@ -452,7 +904,7 @@ public class BoMScreen extends Screen {
 				return true;
 			}
 			if (hover.stack != null) {
-				if (EmiInput.isShiftDown() && button == 0) {
+				if (EmiInput.isShiftDown() && !EmiInput.isControlDown() && button == 0) {
 					if (getAutoResolutions(hover, BoM.tree::addResolution)) {
 						recalculateTree();
 					}
@@ -495,7 +947,21 @@ public class BoMScreen extends Screen {
 	}
 
 	@Override
+	public boolean mouseReleased(double mouseX, double mouseY, int button) {
+		if (button == 2 && draggedNode != null) {
+			draggedNode = null;
+			draggingBranch = false;
+			return true;
+		}
+		return super.mouseReleased(mouseX, mouseY, button);
+	}
+
+	@Override
 	public boolean mouseScrolled(double mouseX, double mouseY, double amount) {
+		if (libraryOpen && getLibraryPanelBounds().contains((int) mouseX, (int) mouseY)) {
+			libraryScrollTarget = MathHelper.clamp(libraryScrollTarget - (float) amount * 0.65f, 0, getLibraryMaxScroll());
+			return true;
+		}
 		scrollAcc += amount;
 		amount = (int) scrollAcc;
 		scrollAcc %= 1;
@@ -528,6 +994,17 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
+		if (button == 2 && draggedNode != null && EmiInput.isControlDown()) {
+			float scale = getScale();
+			int mx = (int) ((mouseX - width / 2) / scale - offX);
+			int my = (int) ((mouseY - height / 2) / scale - offY);
+			int dx = mx - dragLastTreeX;
+			int dy = my - dragLastTreeY;
+			dragLastTreeX = mx;
+			dragLastTreeY = my;
+			moveDraggedNode(dx, dy);
+			return true;
+		}
 		if (button == 0 || button == 2) {
 			float scale = getScale();
 			offX += deltaX / scale;
@@ -542,9 +1019,49 @@ public class BoMScreen extends Screen {
 		return false;
 	}
 
+	private void moveDraggedNode(int dx, int dy) {
+		if (dx == 0 && dy == 0 || BoM.tree == null || draggedNode == null) {
+			return;
+		}
+		for (Node node : nodes) {
+			if (node == draggedNode || (draggingBranch && node.path.startsWith(draggedNode.path + "/"))) {
+				node.x += dx;
+				node.y += dy;
+				MaterialTree.NodeOffset current = BoM.tree.nodeOffsets.get(node.path);
+				int ox = current == null ? 0 : current.x();
+				int oy = current == null ? 0 : current.y();
+				BoM.tree.nodeOffsets.put(node.path, new MaterialTree.NodeOffset(ox + dx, oy + dy));
+			}
+		}
+	}
+
 	@Override
 	public void close() {
 		MinecraftClient.getInstance().setScreen(old);
+	}
+
+	public @org.jetbrains.annotations.Nullable SavedRecipeTree.RecipeTreeSnapshot createSnapshot() {
+		return SavedRecipeTree.RecipeTreeSnapshot.capture(BoM.tree, offX, offY, zoom);
+	}
+
+	public EmiIngredient getTreeThumbnail() {
+		if (BoM.tree != null && BoM.tree.goal != null) {
+			return BoM.tree.goal.ingredient;
+		}
+		return EmiStack.EMPTY;
+	}
+
+	public String getDefaultTreeName() {
+		EmiIngredient ingredient = getTreeThumbnail();
+		if (!ingredient.isEmpty() && !ingredient.getEmiStacks().isEmpty()) {
+			return ingredient.getEmiStacks().get(0).getName().getString();
+		}
+		return "Empty Slot";
+	}
+
+	public void applyLoadedTree(boolean missingData) {
+		loadWarning = missingData;
+		init(client, width, height);
 	}
 
 	private class Cost {
@@ -561,7 +1078,7 @@ public class BoMScreen extends Screen {
 		}
 
 		public void render(EmiDrawContext context) {
-			batcher.render(cost.ingredient, context.raw(), x, y, 0, ~(EmiIngredient.RENDER_AMOUNT | EmiIngredient.RENDER_REMAINDER));
+			cost.ingredient.render(context.raw(), x, y, 0, ~(EmiIngredient.RENDER_AMOUNT | EmiIngredient.RENDER_REMAINDER));
 			EmiRenderHelper.renderAmount(context, x, y, getAmountText());
 		}
 
@@ -592,24 +1109,28 @@ public class BoMScreen extends Screen {
 		public EmiIngredient stack;
 		public MaterialNode node, resolve;
 		public EmiRecipeCategory category;
+		public Node renderNode;
 
 		public Hover(EmiIngredient stack) {
 			this.stack = stack;
 		}
 
-		public Hover(EmiIngredient stack, MaterialNode node, MaterialNode resolve) {
+		public Hover(EmiIngredient stack, MaterialNode node, MaterialNode resolve, Node renderNode) {
 			this.stack = stack;
 			this.node = node;
 			this.resolve = resolve;
+			this.renderNode = renderNode;
 		}
 
-		public Hover(EmiRecipeCategory category, MaterialNode node) {
+		public Hover(EmiRecipeCategory category, MaterialNode node, Node renderNode) {
 			this.category = category;
 			this.node = node;
+			this.renderNode = renderNode;
 		}
 
-		public Hover(MaterialNode node) {
+		public Hover(MaterialNode node, Node renderNode) {
 			this.node = node;
+			this.renderNode = renderNode;
 		}
 
 		public boolean drawTooltip(Screen screen, EmiDrawContext context, int mouseX, int mouseY) {
@@ -626,6 +1147,9 @@ public class BoMScreen extends Screen {
 					});
 				} else if (node != null && node.recipe != null) {
 					list.add(new RecipeTooltipComponent(node.recipe));
+					if (node.hasComparisons()) {
+						list.add(EmiTooltipComponents.of(EmiPort.literal("Comparison expanded", Formatting.GRAY)));
+					}
 				}
 				if (node != null) {
 					if (node.consumeChance != 1) {
@@ -651,13 +1175,22 @@ public class BoMScreen extends Screen {
 		public Node parent = null;
 		public MaterialNode resolution = null;
 		public MaterialNode node;
+		public String path;
 		public int width, x, y, midOffset;
+		public int outlineColor;
 		public long amount;
 		public ChanceState chance;
+		public boolean comparisonHead = false;
+		public boolean comparisonCandidate = false;
+		public boolean comparisonSelected = false;
+		public long comparisonCost = 0;
+		public MaterialNode compareOwner = null;
 
-		public Node(MaterialNode node, long amount, int x, int y, ChanceState chance) {
+		public Node(MaterialNode node, long amount, int x, int y, ChanceState chance, String path, int outlineColor) {
 			this.node = node;
-			if (node.recipe != null) {
+			this.path = path;
+			this.outlineColor = outlineColor;
+			if (node.recipe != null && !node.hasComparisons()) {
 				width = 42;
 			} else {
 				width = 16;
@@ -675,7 +1208,7 @@ public class BoMScreen extends Screen {
 			if (parent != null) {
 				context.push();
 
-				setColor(context, parent.node, node.consumeChance != 1 || (resolution != null && resolution.consumeChance != 1), false);
+				setColor(context, outlineColor, parent.node, node.consumeChance != 1 || (resolution != null && resolution.consumeChance != 1), false);
 				
 				int nx = x;
 				int ny = y;
@@ -689,19 +1222,19 @@ public class BoMScreen extends Screen {
 				} else {
 					drawLine(context, nx, ny - 11, nx, py + off);
 				}
-				setColor(context, parent.node, false, false);
+				setColor(context, outlineColor, parent.node, false, false);
 				drawLine(context, px, py + off, nx, py + off);
 				context.pop();
 			}
 			int xo = 0;
-			if (node.recipe != null) {
+			if (node.recipe != null && !comparisonHead) {
 				int lx = x - width / 2;
 				int ly = y - 11;
 				int hx = x + width / 2;
 				int hy = y + 10;
 				context.push();
 
-				setColor(context, node, node.produceChance != 1, false);
+				setColor(context, outlineColor, node, node.produceChance != 1, false);
 
 				if (node.state != FoldState.EXPANDED) {
 					drawLine(context, x, hy + 1, x, hy + 3);
@@ -710,27 +1243,36 @@ public class BoMScreen extends Screen {
 				}
 
 				boolean hovered = mouseX >= lx && mouseY >= ly && mouseX <= hx && mouseY <= hy;
-				setColor(context, node, node.produceChance != 1, hovered);
+				setColor(context, outlineColor, node, node.produceChance != 1, hovered);
+				if (comparisonCandidate && comparisonSelected) {
+					context.setColor(0.93f, 0.82f, 0.35f, 1f);
+				}
 				drawLine(context, lx, ly, lx, hy);
 				drawLine(context, hx, ly, hx, hy);
 				drawLine(context, lx, ly, hx, ly);
 				drawLine(context, lx, hy, hx, hy);
 				EmiRecipeCategory cat = node.recipe.getCategory();
-				if (StackBatcher.isEnabled() && EmiRecipeCategoryProperties.getSimplifiedIcon(cat) instanceof Batchable b) {
-					batcher.render(b, context.raw(), x - 18 + midOffset, y - 8, delta);
-				} else {
-					cat.renderSimplified(context.raw(), x - 18 + midOffset, y - 8, delta);
-				}
+				cat.renderSimplified(context.raw(), x - 18 + midOffset, y - 8, delta);
 				xo = 11;
 				context.pop();
+				if (comparisonCandidate) {
+					MicroTextRenderer.render(context, comparisonCost, false, 18, x + width / 2 - 1, y - 12, comparisonSelected ? 0xFFF0D46A : 0xFFB5C6D8);
+				}
 			}
 			context.setColor(1f, 1f, 1f, 1f);
-			batcher.render(node.ingredient, context.raw(), x + xo - 8 + midOffset, y - 8, 0);
+			node.ingredient.render(context.raw(), x + xo - 8 + midOffset, y - 8, 0, -1);
 			EmiRenderHelper.renderAmount(context, x + xo - 8 + midOffset, y - 8, getAmountText());
 		}
 
-		public void setColor(EmiDrawContext context, MaterialNode node, boolean chanced, boolean hovered) {
-			context.setColor(1f, 1f, 1f, 1f);
+		public void setColor(EmiDrawContext context, int baseColor, MaterialNode node, boolean chanced, boolean hovered) {
+			if (baseColor == -1) {
+				context.setColor(1f, 1f, 1f, 1f);
+			} else {
+				float r = ((baseColor >> 16) & 0xFF) / 255f;
+				float g = ((baseColor >> 8) & 0xFF) / 255f;
+				float b = (baseColor & 0xFF) / 255f;
+				context.setColor(r, g, b, 1f);
+			}
 			if (chanced) {
 				context.setColor(0.8f, 0.6f, 0.1f, 1f);
 			}
@@ -740,6 +1282,9 @@ public class BoMScreen extends Screen {
 				} else if (node.progress == ProgressState.PARTIAL) {
 					context.setColor(0.8f, 0.2f, 0.9f, 1f);
 				}
+			}
+			if (node.missing) {
+				context.setColor(0.95f, 0.35f, 0.35f, 1f);
 			}
 			if (hovered) {
 				context.setColor(0.5f, 0.6f, 1f, 1f);
@@ -761,25 +1306,25 @@ public class BoMScreen extends Screen {
 		public Hover getHover(int mouseX, int mouseY) {
 			if (resolution != null) {
 				if (mouseX >= x - 4 && mouseX < x + 4 && mouseY >= y - 19 && mouseY < y - 11) {
-					return new Hover(resolution.ingredient, resolution, null);
+					return new Hover(resolution.ingredient, resolution, null, this);
 				}
 			}
 			int imx = mouseX;
-			if (node.recipe != null) {
+			if (node.recipe != null && !comparisonHead) {
 				if (mouseX >= x - 18 + midOffset && mouseX < x - 2 + midOffset && mouseY >= y - 8 && mouseY < y + 8) {
-					return new Hover(node.recipe.getCategory(), node);
+					return new Hover(node.recipe.getCategory(), node, this);
 				}
 				imx -= 11;
 			}
 			if (imx >= x - 8 + midOffset && imx < x + 8 + midOffset && mouseY >= y - 8 && mouseY < y + 8) {
-				return new Hover(node.ingredient, node, resolution);
+				return new Hover(node.ingredient, node, resolution, this);
 			}
 			int lx = x - width / 2;
 			int ly = y - 11;
 			int hx = x + width / 2;
 			int hy = y + 10;
 			if (mouseX >= lx && mouseY >= ly && mouseX <= hx && mouseY <= hy) {
-				return new Hover(node);
+				return new Hover(node, this);
 			}
 			return null;
 		}
@@ -789,16 +1334,16 @@ public class BoMScreen extends Screen {
 		public List<Width> widths = Lists.newArrayList();
 		public List<Node> nodes = Lists.newArrayList();
 
-		public TreeVolume(MaterialNode node, long amount, int y, ChanceState chance) {
-			Node head = new Node(node, amount, 0, y, chance);
+		public TreeVolume(MaterialNode node, long amount, int y, ChanceState chance, String path, int outlineColor) {
+			Node head = new Node(node, amount, 0, y, chance, path, outlineColor);
 			int l = head.width / 2;
 			widths.add(new Width(-l, head.width - l));
 			nodes.add(head);
 		}
 
-		public void addHead(MaterialNode node, long amount, int y, ChanceState chance) {
+		public void addHead(MaterialNode node, long amount, int y, ChanceState chance, String path, int outlineColor) {
 			int x = (getLeft(0) + getRight(0)) / 2;
-			Node newNode = new Node(node, amount, x, y, chance);
+			Node newNode = new Node(node, amount, x, y, chance, path, outlineColor);
 			for (Node n : nodes) {
 				if (n.parent == null) {
 					n.parent = newNode;
