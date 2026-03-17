@@ -96,6 +96,7 @@ public class BoMScreen extends Screen {
 	private TextFieldWidget renameField;
 	private long lastLibraryClickTime = 0;
 	private int lastLibraryClickSlot = -1;
+	private String actionNodePath = null;
 
 	public BoMScreen(HandledScreen<?> old) {
 		super(EmiPort.translatable("screen.emi.recipe_tree"));
@@ -490,6 +491,120 @@ public class BoMScreen extends Screen {
 		selectedLibrarySlot = slot;
 	}
 
+	private Node getActionNode() {
+		if (actionNodePath == null) {
+			return null;
+		}
+		for (Node node : nodes) {
+			if (actionNodePath.equals(node.path)) {
+				return node;
+			}
+		}
+		actionNodePath = null;
+		return null;
+	}
+
+	private Bounds getActionStripBounds(Node node) {
+		int width = 122;
+		int height = 18;
+		return new Bounds(node.x + node.width / 2 + 10, node.y - 9, width, height);
+	}
+
+	private Bounds getActionButtonBounds(Bounds strip, int index) {
+		return new Bounds(strip.x() + index * 31, strip.y(), 28, strip.height());
+	}
+
+	private String getActionLabel(ActionButton action) {
+		return switch (action) {
+			case COMPARE -> "Cmp";
+			case AUTO -> "Auto";
+			case CLEAR -> "Clear";
+			case RECIPES -> "Open";
+		};
+	}
+
+	private boolean isActionEnabled(ActionButton action, Node node) {
+		if (node == null || node.node == null) {
+			return false;
+		}
+		return switch (action) {
+			case COMPARE -> node.node.ingredient.getEmiStacks().size() == 1;
+			case AUTO -> {
+				Hover hover = new Hover(node.node.ingredient, node.node, node.resolution, node);
+				yield getAutoResolutions(hover, (stack, recipe) -> {
+				});
+			}
+			case CLEAR -> node.node.recipe != null;
+			case RECIPES -> true;
+		};
+	}
+
+	private void renderActionStrip(EmiDrawContext context, int mouseX, int mouseY) {
+		Node node = getActionNode();
+		if (node == null || node.comparisonCandidate) {
+			return;
+		}
+		Bounds strip = getActionStripBounds(node);
+		context.fill(strip.x() - 1, strip.y() - 1, strip.width() + 2, strip.height() + 2, 0xAA0E141B);
+		context.fill(strip.x(), strip.y(), strip.width(), strip.height(), 0xF11C2936);
+		for (int i = 0; i < ActionButton.values().length; i++) {
+			ActionButton action = ActionButton.values()[i];
+			Bounds bounds = getActionButtonBounds(strip, i);
+			boolean active = isActionEnabled(action, node);
+			int color = active ? (bounds.contains(mouseX, mouseY) ? 0xFF6E97BF : 0xFF355069) : 0xFF26303A;
+			context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), color);
+			context.drawCenteredText(EmiPort.literal(getActionLabel(action), active ? Formatting.WHITE : Formatting.DARK_GRAY),
+				bounds.x() + bounds.width() / 2, bounds.y() + 5);
+		}
+	}
+
+	private boolean handleActionClick(int mouseX, int mouseY) {
+		Node node = getActionNode();
+		if (node == null) {
+			return false;
+		}
+		Bounds strip = getActionStripBounds(node);
+		if (!strip.contains(mouseX, mouseY)) {
+			return false;
+		}
+		for (int i = 0; i < ActionButton.values().length; i++) {
+			ActionButton action = ActionButton.values()[i];
+			Bounds bounds = getActionButtonBounds(strip, i);
+			if (!bounds.contains(mouseX, mouseY) || !isActionEnabled(action, node)) {
+				continue;
+			}
+			switch (action) {
+				case COMPARE -> {
+					if (toggleComparison(node.node)) {
+						recalculateTree();
+					}
+				}
+				case AUTO -> {
+					Hover hover = new Hover(node.node.ingredient, node.node, node.resolution, node);
+					if (getAutoResolutions(hover, BoM.tree::addResolution)) {
+						recalculateTree();
+					}
+				}
+				case CLEAR -> {
+					BoM.tree.addResolution(node.node.ingredient, null);
+					node.node.clearComparisons();
+					recalculateTree();
+				}
+				case RECIPES -> {
+					EmiApi.displayRecipes(node.node.ingredient);
+					RecipeScreen.resolve = node.node.ingredient;
+					MinecraftClient client = MinecraftClient.getInstance();
+					client.currentScreen.init(client, client.currentScreen.width, client.currentScreen.height);
+					if (node.node.recipe != null) {
+						EmiApi.focusRecipe(node.node.recipe);
+					}
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
 	@Override
 	public void render(DrawContext raw, int mouseX, int mouseY, float delta) {
 		EmiDrawContext context = EmiDrawContext.wrap(raw);
@@ -529,6 +644,7 @@ public class BoMScreen extends Screen {
 			for (Node node : nodes) {
 				node.render(context, mx, my, delta);
 			}
+			renderActionStrip(context, mx, my);
 			int color = -1;
 			if (batches.contains(mx, my)) {
 				color = 0xff8099ff;
@@ -559,6 +675,8 @@ public class BoMScreen extends Screen {
 		if (loadWarning) {
 			context.drawTextWithShadow(EmiPort.literal("Loaded recipe tree with missing data", Formatting.YELLOW), 8, 34, -1);
 		}
+		context.drawTextWithShadow(EmiPort.literal("LMB node: actions  |  LMB compare: select  |  RMB: fold  |  MMB drag: pan  |  Ctrl+MMB: move node  |  Ctrl+Shift+MMB: move branch", Formatting.DARK_GRAY),
+			8, height - 28, -1);
 		if (libraryOpen) {
 			libraryScroll += (libraryScrollTarget - libraryScroll) * 0.35f;
 			if (Math.abs(libraryScrollTarget - libraryScroll) < 0.01f) {
@@ -582,7 +700,14 @@ public class BoMScreen extends Screen {
 			List<TooltipComponent> list = EmiTooltip.splitTranslate(key, BoM.tree.batches);
 			EmiRenderHelper.drawTooltip(this, context, list, mouseX, mouseY);
 		} else if (help.contains(mouseX, mouseY)) {
-			List<TooltipComponent> list =  EmiTooltip.splitTranslate("tooltip.emi.bom.help");
+			List<TooltipComponent> list = Lists.newArrayList();
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Tree controls", Formatting.WHITE)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Left click node: open actions", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Left click compare candidate: select recipe", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Right click: fold or unfold", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Middle drag: pan view", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Middle drag: move node", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Shift + Middle drag: move branch", Formatting.GRAY)));
 			EmiRenderHelper.drawTooltip(this, context, list, width - 18, height - 18, width);
 		}
 	}
@@ -603,6 +728,13 @@ public class BoMScreen extends Screen {
 			}
 		}
 		return null;
+	}
+
+	private enum ActionButton {
+		COMPARE,
+		AUTO,
+		CLEAR,
+		RECIPES
 	}
 
 	public int getNodeHeight(MaterialNode node) {
@@ -863,10 +995,13 @@ public class BoMScreen extends Screen {
 		if (handleLibraryClick(mouseX, mouseY, button)) {
 			return true;
 		}
-		Hover hover = getHoveredStack((int) mouseX, (int) mouseY);
 		float scale = getScale();
 		int mx = (int) ((mouseX - width / 2) / scale - offX);
 		int my = (int) ((mouseY - height / 2) / scale - offY);
+		if (button == 0 && handleActionClick(mx, my)) {
+			return true;
+		}
+		Hover hover = getHoveredStack((int) mouseX, (int) mouseY);
 		if (button == 2 && EmiInput.isControlDown() && hover != null && hover.node != null) {
 			for (Node node : nodes) {
 				if (node.node == hover.node) {
@@ -879,21 +1014,28 @@ public class BoMScreen extends Screen {
 			}
 		}
 		if (hover != null) {
+			if (button == 0 && hover.renderNode != null && hover.renderNode.comparisonCandidate) {
+				if (selectComparison(hover.renderNode.compareOwner, hover.node.recipe)) {
+					actionNodePath = null;
+					recalculateTree();
+					return true;
+				}
+			}
 			if (button == 0 && EmiInput.isControlDown() && EmiInput.isShiftDown() && hover.node != null) {
 				if (hover.renderNode != null && hover.renderNode.comparisonCandidate) {
 					if (selectComparison(hover.renderNode.compareOwner, hover.node.recipe)) {
+						actionNodePath = null;
 						recalculateTree();
 						return true;
 					}
 				} else if (toggleComparison(hover.node)) {
+					actionNodePath = hover.renderNode != null ? hover.renderNode.path : actionNodePath;
 					recalculateTree();
 					return true;
 				}
 			}
 			if (button == 1 && hover.node != null && hover.node.recipe != null) {
-				if (EmiInput.isShiftDown()) {
-					BoM.tree.addResolution(hover.node.ingredient, null);
-				} else if (!(hover.node.recipe instanceof EmiResolutionRecipe)) {
+				if (!(hover.node.recipe instanceof EmiResolutionRecipe)) {
 					if (hover.node.state == FoldState.EXPANDED) {
 						hover.node.state = FoldState.COLLAPSED;
 					} else {
@@ -904,28 +1046,21 @@ public class BoMScreen extends Screen {
 				return true;
 			}
 			if (hover.stack != null) {
-				if (EmiInput.isShiftDown() && !EmiInput.isControlDown() && button == 0) {
-					if (getAutoResolutions(hover, BoM.tree::addResolution)) {
-						recalculateTree();
-					}
+				if (button == 0 && hover.node != null) {
+					actionNodePath = hover.renderNode != null ? hover.renderNode.path : null;
 					return true;
-				} else {
-					if (button == 0) {
-						EmiApi.displayRecipes(hover.stack);
-						RecipeScreen.resolve = hover.stack;
-						MinecraftClient client = MinecraftClient.getInstance();
-						// The first init doesn't realize a resolution exists so we do it again. What
-						// could go wrong.
-						client.currentScreen.init(client, client.currentScreen.width, client.currentScreen.height);
-						if (hover.node != null) {
-							if (hover.node.recipe != null) {
-								EmiApi.focusRecipe(hover.node.recipe);
-							}
-						}
-						return true;
-					}
+				} else if (button == 0) {
+					EmiApi.displayRecipes(hover.stack);
+					RecipeScreen.resolve = hover.stack;
+					MinecraftClient client = MinecraftClient.getInstance();
+					client.currentScreen.init(client, client.currentScreen.width, client.currentScreen.height);
+					return true;
 				}
+			} else if (button == 0 && hover.node != null) {
+				actionNodePath = hover.renderNode != null ? hover.renderNode.path : null;
+				return true;
 			}
+			actionNodePath = null;
 		} else if (mode.contains(mx, my)) {
 			MinecraftClient.getInstance().getSoundManager().play(PositionedSoundInstance.master(SoundEvents.UI_BUTTON_CLICK, 1.0f));
 			BoM.craftingMode = !BoM.craftingMode;
@@ -937,6 +1072,8 @@ public class BoMScreen extends Screen {
 				BoM.tree.batches = ideal;
 				recalculateTree();
 			}
+		} else if (button == 0) {
+			actionNodePath = null;
 		}
 		Function<EmiBind, Boolean> function = bind -> bind.matchesMouse(button);
 		if (function.apply(EmiConfig.back)) {
@@ -1005,7 +1142,7 @@ public class BoMScreen extends Screen {
 			moveDraggedNode(dx, dy);
 			return true;
 		}
-		if (button == 0 || button == 2) {
+		if (button == 2) {
 			float scale = getScale();
 			offX += deltaX / scale;
 			offY += deltaY / scale;
@@ -1137,19 +1274,16 @@ public class BoMScreen extends Screen {
 			if (stack != null) {
 				List<TooltipComponent> list = Lists.newArrayList();
 				list.addAll(stack.getTooltip());
-				if (EmiInput.isShiftDown()) {
-					getAutoResolutions(this, (stack, recipe) -> {
-						if (node == null || recipe != node.recipe) {
-							list.add(new RecipeTooltipComponent(recipe, 0x4488FFAA));
-						} else {
-							list.add(new RecipeTooltipComponent(recipe));
-						}
-					});
-				} else if (node != null && node.recipe != null) {
+				if (node != null && node.recipe != null) {
 					list.add(new RecipeTooltipComponent(node.recipe));
 					if (node.hasComparisons()) {
 						list.add(EmiTooltipComponents.of(EmiPort.literal("Comparison expanded", Formatting.GRAY)));
 					}
+				}
+				if (renderNode != null && renderNode.comparisonCandidate) {
+					list.add(EmiTooltipComponents.of(EmiPort.literal("Left click to select this recipe path", Formatting.AQUA)));
+				} else if (node != null) {
+					list.add(EmiTooltipComponents.of(EmiPort.literal("Left click for node actions", Formatting.DARK_GRAY)));
 				}
 				if (node != null) {
 					if (node.consumeChance != 1) {
