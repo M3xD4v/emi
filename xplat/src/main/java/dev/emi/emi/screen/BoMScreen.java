@@ -153,18 +153,23 @@ public class BoMScreen extends Screen {
 			Map<String, NodePosition> previousPositions = nodes.stream()
 				.filter(n -> resetPath == null || !n.path.startsWith(resetPath + "/"))
 				.collect(Collectors.toMap(n -> n.path, n -> new NodePosition(n.x, n.y, n.getStructureKey()), (a, b) -> b));
-			LayoutBlock layout = buildLayoutBlock(BoM.tree.goal, BoM.tree.batches, 1, ChanceState.DEFAULT, "0", -1, 0);
-			nodes = Lists.newArrayList();
-			placeLayoutBlock(layout, -layout.subtreeWidth / 2, 0, null);
+			TreeVolume volume = addNewNodes(BoM.tree.goal, BoM.tree.batches, 1, 0, ChanceState.DEFAULT, "0", -1, 0);
+			nodes = volume.nodes;
+			int horizontalOffset = (volume.getMaxRight() + volume.getMinLeft()) / 2;
+			for (Node node : volume.nodes) {
+				node.x -= horizontalOffset;
+				node.layoutX = node.x;
+				node.layoutY = node.y;
+			}
 			applyAnchoredPositions(previousPositions);
-			if (!nodes.isEmpty()) {
-				Node node = nodes.get(0);
+			if (!volume.nodes.isEmpty()) {
+				Node node = volume.nodes.get(0);
 				int width = textRenderer.getWidth("x" + BoM.tree.batches);
 				batches = new Bounds(node.x + node.width / 2 + 6, node.y - 10, width + 12, 22);
 			}
 
-			nodeWidth = getNodeMaxRight() - getNodeMinLeft();
-			nodeHeight = getRenderedNodeHeight();
+			nodeWidth = volume.getMaxRight() - volume.getMinLeft();
+			nodeHeight = getNodeHeight(BoM.tree.goal);
 			playerInv = EmiPlayerInventory.of(client.player);
 			BoM.tree.calculateProgress(playerInv);
 			Map<EmiIngredient, FlatMaterialCost> progressCosts = BoM.tree.cost.costs.values().stream()
@@ -590,115 +595,6 @@ public class BoMScreen extends Screen {
 		return null;
 	}
 
-	private LayoutBlock buildLayoutBlock(MaterialNode node, long multiplier, long divisor, ChanceState chance, String path, int outlineColor, int colorSeed) {
-		long amount;
-		if (node.catalyst) {
-			amount = node.amount;
-		} else {
-			amount = node.amount * (int) Math.ceil(multiplier / (float) divisor);
-		}
-		if (node.hasComparisons()) {
-			List<LayoutBlock> children = Lists.newArrayList();
-			int laneWidth = 0;
-			for (int i = 0; i < node.comparisons.size(); i++) {
-				MaterialNode.Comparison comparison = node.comparisons.get(i);
-				int childColor = getBranchColor(path + "/cmp", i, colorSeed);
-				LayoutBlock child = buildLayoutBlock(comparison.node, amount, comparison.node.divisor, chance,
-					path + "/@cmp/" + i, childColor, colorSeed + i + 1);
-				child.comparisonCandidate = true;
-				child.comparisonSelected = comparison.selected;
-				child.comparisonCost = comparison.estimatedCost;
-				child.compareOwner = node;
-				laneWidth = Math.max(laneWidth, child.subtreeWidth);
-				children.add(child);
-			}
-			int selfWidth = measureNodeWidth(node, amount, chance);
-			int childrenWidth = children.isEmpty() ? 0 : laneWidth * children.size() + COMPARISON_HORIZONTAL_SPACING * (children.size() - 1);
-			LayoutBlock block = new LayoutBlock(node, amount, chance, path, outlineColor, selfWidth, Math.max(selfWidth, childrenWidth));
-			block.comparisonHead = true;
-			block.children.addAll(children);
-			block.childLaneWidth = laneWidth;
-			block.childSpacing = COMPARISON_HORIZONTAL_SPACING;
-			block.equalChildLanes = true;
-			return block;
-		}
-		if (node.recipe != null && !node.children.isEmpty() && node.state == FoldState.EXPANDED) {
-			ChanceState produced = chance.produce(node.produceChance);
-			if (node.recipe instanceof EmiResolutionRecipe) {
-				LayoutBlock child = buildLayoutBlock(node.children.get(0), amount, node.divisor, produced, path + "/0", outlineColor, colorSeed);
-				child.resolution = node;
-				return child;
-			}
-			List<LayoutBlock> children = Lists.newArrayList();
-			int childrenWidth = 0;
-			for (int i = 0; i < node.children.size(); i++) {
-				ChanceState consumed = produced.consume(node.children.get(i).consumeChance);
-				int childColor = getBranchColor(path, i, colorSeed);
-				LayoutBlock child = buildLayoutBlock(node.children.get(i), amount, node.divisor, consumed,
-					path + "/" + i, childColor, colorSeed + i + 1);
-				if (!children.isEmpty()) {
-					childrenWidth += NODE_HORIZONTAL_SPACING;
-				}
-				childrenWidth += child.subtreeWidth;
-				children.add(child);
-			}
-			int selfWidth = measureNodeWidth(node, amount, chance);
-			LayoutBlock block = new LayoutBlock(node, amount, chance, path, outlineColor, selfWidth, Math.max(selfWidth, childrenWidth));
-			block.children.addAll(children);
-			block.childSpacing = NODE_HORIZONTAL_SPACING;
-			return block;
-		}
-		int selfWidth = measureNodeWidth(node, amount, chance);
-		return new LayoutBlock(node, amount, chance, path, outlineColor, selfWidth, selfWidth);
-	}
-
-	private void placeLayoutBlock(LayoutBlock block, int left, int depth, Node parent) {
-		int centerX = left + block.subtreeWidth / 2;
-		Node render = new Node(block.node, block.amount, centerX, depth * NODE_VERTICAL_SPACING, block.chance, block.path, block.outlineColor);
-		render.layoutX = render.x;
-		render.layoutY = render.y;
-		render.parent = parent;
-		render.resolution = block.resolution;
-		render.comparisonHead = block.comparisonHead;
-		render.comparisonCandidate = block.comparisonCandidate;
-		render.comparisonSelected = block.comparisonSelected;
-		render.comparisonCost = block.comparisonCost;
-		render.compareOwner = block.compareOwner;
-		nodes.add(render);
-		if (block.children.isEmpty()) {
-			return;
-		}
-		int childrenWidth;
-		if (block.equalChildLanes) {
-			childrenWidth = block.childLaneWidth * block.children.size() + block.childSpacing * (block.children.size() - 1);
-		} else {
-			childrenWidth = block.children.stream().mapToInt(c -> c.subtreeWidth).sum() + block.childSpacing * (block.children.size() - 1);
-		}
-		int childLeft = left + (block.subtreeWidth - childrenWidth) / 2;
-		for (LayoutBlock child : block.children) {
-			int allocatedWidth = block.equalChildLanes ? block.childLaneWidth : child.subtreeWidth;
-			int actualLeft = childLeft + (allocatedWidth - child.subtreeWidth) / 2;
-			placeLayoutBlock(child, actualLeft, depth + 1, render);
-			childLeft += allocatedWidth + block.childSpacing;
-		}
-	}
-
-	private int measureNodeWidth(MaterialNode node, long amount, ChanceState chance) {
-		return new Node(node, amount, 0, 0, chance, "", -1).width;
-	}
-
-	private int getNodeMinLeft() {
-		return nodes.stream().mapToInt(Node::getLeft).min().orElse(0);
-	}
-
-	private int getNodeMaxRight() {
-		return nodes.stream().mapToInt(Node::getRight).max().orElse(0);
-	}
-
-	private int getRenderedNodeHeight() {
-		return nodes.stream().mapToInt(n -> n.y / NODE_VERTICAL_SPACING + 1).max().orElse(1);
-	}
-
 	private Bounds getContextMenuBounds() {
 		Node node = getContextMenuNode();
 		if (node == null) {
@@ -956,36 +852,6 @@ public class BoMScreen extends Screen {
 	}
 
 	private record LibraryRowButtons(Bounds save, Bounds rename, Bounds delete, Bounds override) {
-	}
-
-	private static class LayoutBlock {
-		public final MaterialNode node;
-		public final long amount;
-		public final ChanceState chance;
-		public final String path;
-		public final int outlineColor;
-		public final int selfWidth;
-		public final int subtreeWidth;
-		public final List<LayoutBlock> children = Lists.newArrayList();
-		public MaterialNode resolution = null;
-		public boolean comparisonHead = false;
-		public boolean comparisonCandidate = false;
-		public boolean comparisonSelected = false;
-		public long comparisonCost = 0;
-		public MaterialNode compareOwner = null;
-		public int childSpacing = NODE_HORIZONTAL_SPACING;
-		public int childLaneWidth = 0;
-		public boolean equalChildLanes = false;
-
-		public LayoutBlock(MaterialNode node, long amount, ChanceState chance, String path, int outlineColor, int selfWidth, int subtreeWidth) {
-			this.node = node;
-			this.amount = amount;
-			this.chance = chance;
-			this.path = path;
-			this.outlineColor = outlineColor;
-			this.selfWidth = selfWidth;
-			this.subtreeWidth = subtreeWidth;
-		}
 	}
 
 	private enum ContextAction {
