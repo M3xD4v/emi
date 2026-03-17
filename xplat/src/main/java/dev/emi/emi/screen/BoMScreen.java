@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.Comparator;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -601,6 +602,52 @@ public class BoMScreen extends Screen {
 		return null;
 	}
 
+	private Set<String> captureOpenComparisonPaths(String excludedPath) {
+		Set<String> paths = new HashSet<>();
+		for (Node node : nodes) {
+			if ((node.comparisonHead || node.node.hasComparisons())
+				&& (excludedPath == null || !excludedPath.equals(node.path))) {
+				paths.add(node.path);
+			}
+		}
+		return paths;
+	}
+
+	private void restoreOpenComparisons(Set<String> openPaths) {
+		if (BoM.tree == null || openPaths.isEmpty()) {
+			return;
+		}
+		openPaths.stream()
+			.sorted(Comparator.comparingInt(String::length))
+			.forEach(path -> {
+				MaterialNode node = findNodeByPath(BoM.tree.goal, "0", path);
+				if (node != null && !node.hasComparisons()) {
+					toggleComparison(node);
+				}
+			});
+	}
+
+	private MaterialNode findNodeByPath(MaterialNode node, String currentPath, String targetPath) {
+		if (node == null) {
+			return null;
+		}
+		if (currentPath.equals(targetPath)) {
+			return node;
+		}
+		if (node.recipe != null && node.children != null && !node.children.isEmpty() && node.state == FoldState.EXPANDED) {
+			if (node.recipe instanceof EmiResolutionRecipe) {
+				return findNodeByPath(node.children.get(0), currentPath + "/0", targetPath);
+			}
+			for (int i = 0; i < node.children.size(); i++) {
+				MaterialNode found = findNodeByPath(node.children.get(i), currentPath + "/" + i, targetPath);
+				if (found != null) {
+					return found;
+				}
+			}
+		}
+		return null;
+	}
+
 	private Bounds getContextMenuBounds() {
 		Node node = getContextMenuNode();
 		if (node == null) {
@@ -695,14 +742,18 @@ public class BoMScreen extends Screen {
 					}
 				}
 				case AUTO -> {
+					Set<String> openComparisons = captureOpenComparisonPaths(null);
 					Hover hover = new Hover(node.node.ingredient, node.node, node.resolution, node);
 					if (getAutoResolutions(hover, BoM.tree::addResolution)) {
+						restoreOpenComparisons(openComparisons);
 						recalculateTree(node.path);
 					}
 				}
 				case CLEAR -> {
+					Set<String> openComparisons = captureOpenComparisonPaths(null);
 					BoM.tree.addResolution(node.node.ingredient, null);
 					node.node.clearComparisons();
+					restoreOpenComparisons(openComparisons);
 					recalculateTree(node.path);
 				}
 				case RECIPES -> {
@@ -1114,8 +1165,11 @@ public class BoMScreen extends Screen {
 		if (BoM.tree == null || compareOwner == null || recipe == null) {
 			return false;
 		}
+		String ownerPath = getNodePath(compareOwner);
+		Set<String> openComparisons = captureOpenComparisonPaths(ownerPath);
 		BoM.tree.addResolution(compareOwner.ingredient, recipe);
 		compareOwner.clearComparisons();
+		restoreOpenComparisons(openComparisons);
 		return true;
 	}
 
