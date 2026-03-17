@@ -84,6 +84,8 @@ public class BoMScreen extends Screen {
 	private double scrollAcc = 0;
 	private Node draggedNode;
 	private boolean draggingBranch = false;
+	private boolean draggedNodeMoved = false;
+	private boolean panningView = false;
 	private int dragLastTreeX;
 	private int dragLastTreeY;
 	private boolean loadWarning = false;
@@ -731,7 +733,7 @@ public class BoMScreen extends Screen {
 		if (loadWarning) {
 			context.drawTextWithShadow(EmiPort.literal("Loaded recipe tree with missing data", Formatting.YELLOW), 8, 34, -1);
 		}
-		context.drawTextWithShadow(EmiPort.literal("RMB node: menu  |  LMB compare: select  |  MMB drag: pan  |  Ctrl+MMB: move node  |  Ctrl+Shift+MMB: move branch", Formatting.DARK_GRAY),
+		context.drawTextWithShadow(EmiPort.literal("RMB node: menu  |  LMB drag: move node  |  Ctrl+LMB drag: move branch  |  RMB drag background: pan", Formatting.DARK_GRAY),
 			8, height - 28, -1);
 		if (libraryOpen) {
 			libraryScroll += (libraryScrollTarget - libraryScroll) * 0.35f;
@@ -741,11 +743,12 @@ public class BoMScreen extends Screen {
 			updateRenameField();
 			renderLibraryOverlay(context, raw, mouseX, mouseY, delta);
 		}
-		renderContextMenu(context, mouseX, mouseY);
 		super.render(raw, mouseX, mouseY, delta);
 
 		Hover hover = getHoveredStack(mouseX, mouseY);
-		if (hover != null) {
+		if (getContextMenuNode() != null) {
+			renderContextMenu(context, mouseX, mouseY);
+		} else if (hover != null) {
 			hover.drawTooltip(this, context, mouseX, mouseY);
 		} else if (BoM.tree != null && batches.contains(mx, my)) {
 			List<TooltipComponent> list = Lists.newArrayList();
@@ -760,10 +763,10 @@ public class BoMScreen extends Screen {
 			List<TooltipComponent> list = Lists.newArrayList();
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Tree controls", Formatting.WHITE)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Right click node: open menu", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Left drag: move node", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Left drag: move branch", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Right drag on background: pan view", Formatting.GRAY)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Left click compare candidate: select recipe", Formatting.GRAY)));
-			list.add(EmiTooltipComponents.of(EmiPort.literal("Middle drag: pan view", Formatting.GRAY)));
-			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Middle drag: move node", Formatting.GRAY)));
-			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Shift + Middle drag: move branch", Formatting.GRAY)));
 			EmiRenderHelper.drawTooltip(this, context, list, width - 18, height - 18, width);
 		}
 	}
@@ -1064,41 +1067,19 @@ public class BoMScreen extends Screen {
 		int mx = (int) ((mouseX - width / 2) / scale - offX);
 		int my = (int) ((mouseY - height / 2) / scale - offY);
 		Hover hover = getHoveredStack((int) mouseX, (int) mouseY);
-		if (button == 2 && EmiInput.isControlDown() && hover != null && hover.node != null) {
-			for (Node node : nodes) {
-				if (node.node == hover.node) {
-					draggedNode = node;
-					draggingBranch = EmiInput.isShiftDown();
-					dragLastTreeX = mx;
-					dragLastTreeY = my;
-					return true;
-				}
-			}
-		}
 		if (hover != null) {
-			if (button == 0 && hover.renderNode != null && hover.renderNode.comparisonCandidate) {
-				if (selectComparison(hover.renderNode.compareOwner, hover.node.recipe)) {
-					closeContextMenu();
-					recalculateTree();
-					return true;
-				}
-			}
 			if (button == 1 && hover.node != null) {
 				openContextMenu(hover.renderNode, (int) mouseX, (int) mouseY);
 				return true;
 			}
-			if (hover.stack != null) {
-				if (button == 0) {
-					closeContextMenu();
-					EmiApi.displayRecipes(hover.stack);
-					RecipeScreen.resolve = hover.stack;
-					MinecraftClient client = MinecraftClient.getInstance();
-					client.currentScreen.init(client, client.currentScreen.width, client.currentScreen.height);
-					if (hover.node != null && hover.node.recipe != null && (hover.renderNode == null || !hover.renderNode.comparisonCandidate)) {
-						EmiApi.focusRecipe(hover.node.recipe);
-					}
-					return true;
-				}
+			if (button == 0 && hover.renderNode != null) {
+				closeContextMenu();
+				draggedNode = hover.renderNode;
+				draggingBranch = EmiInput.isControlDown();
+				draggedNodeMoved = false;
+				dragLastTreeX = mx;
+				dragLastTreeY = my;
+				return true;
 			}
 			closeContextMenu();
 		} else if (mode.contains(mx, my)) {
@@ -1114,6 +1095,12 @@ public class BoMScreen extends Screen {
 				BoM.tree.batches = ideal;
 				recalculateTree();
 			}
+		} else if (button == 1) {
+			closeContextMenu();
+			panningView = true;
+			dragLastTreeX = mx;
+			dragLastTreeY = my;
+			return true;
 		} else if (button == 0 || button == 1) {
 			closeContextMenu();
 		}
@@ -1127,9 +1114,24 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseReleased(double mouseX, double mouseY, int button) {
-		if (button == 2 && draggedNode != null) {
+		if (button == 0 && draggedNode != null) {
+			if (!draggedNodeMoved && draggedNode.comparisonCandidate && selectComparison(draggedNode.compareOwner, draggedNode.node.recipe)) {
+				closeContextMenu();
+				recalculateTree();
+			}
 			draggedNode = null;
 			draggingBranch = false;
+			draggedNodeMoved = false;
+			return true;
+		}
+		if (button == 1 && panningView) {
+			panningView = false;
+			return true;
+		}
+		if (button == 1 && draggedNode != null) {
+			draggedNode = null;
+			draggingBranch = false;
+			draggedNodeMoved = false;
 			return true;
 		}
 		return super.mouseReleased(mouseX, mouseY, button);
@@ -1173,7 +1175,7 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
-		if (button == 2 && draggedNode != null && EmiInput.isControlDown()) {
+		if (button == 0 && draggedNode != null) {
 			float scale = getScale();
 			int mx = (int) ((mouseX - width / 2) / scale - offX);
 			int my = (int) ((mouseY - height / 2) / scale - offY);
@@ -1181,10 +1183,13 @@ public class BoMScreen extends Screen {
 			int dy = my - dragLastTreeY;
 			dragLastTreeX = mx;
 			dragLastTreeY = my;
+			if (dx != 0 || dy != 0) {
+				draggedNodeMoved = true;
+			}
 			moveDraggedNode(dx, dy);
 			return true;
 		}
-		if (button == 2) {
+		if (button == 1 && panningView) {
 			float scale = getScale();
 			offX += deltaX / scale;
 			offY += deltaY / scale;
