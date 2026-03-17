@@ -2,6 +2,8 @@ package dev.emi.emi.screen;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.Comparator;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -142,10 +144,15 @@ public class BoMScreen extends Screen {
 	}
 
 	public void recalculateTree() {
+		recalculateTree(null);
+	}
+
+	public void recalculateTree(String resetPath) {
 		help = new Bounds(width - 18, height - 18, 16, 16);
 		if (BoM.tree != null) {
 			Map<String, NodePosition> previousPositions = nodes.stream()
-				.collect(Collectors.toMap(n -> n.path, n -> new NodePosition(n.x, n.y), (a, b) -> b));
+				.filter(n -> resetPath == null || !n.path.startsWith(resetPath + "/"))
+				.collect(Collectors.toMap(n -> n.path, n -> new NodePosition(n.x, n.y, n.getStructureKey()), (a, b) -> b));
 			TreeVolume volume = addNewNodes(BoM.tree.goal, BoM.tree.batches, 1, 0, ChanceState.DEFAULT, "0", -1, 0);
 			nodes = volume.nodes;
 			int horizontalOffset = (volume.getMaxRight() + volume.getMinLeft()) / 2;
@@ -155,7 +162,6 @@ public class BoMScreen extends Screen {
 				node.layoutY = node.y;
 			}
 			applyAnchoredPositions(previousPositions);
-			resolveNodeOverlaps();
 			if (!volume.nodes.isEmpty()) {
 				Node node = volume.nodes.get(0);
 				int width = textRenderer.getWidth("x" + BoM.tree.batches);
@@ -247,17 +253,22 @@ public class BoMScreen extends Screen {
 		if (BoM.tree == null) {
 			return;
 		}
+		Set<String> resetPrefixes = new java.util.HashSet<>();
 		List<Node> ordered = nodes.stream()
 			.sorted(Comparator.comparingInt((Node n) -> n.path.length()))
 			.toList();
 		for (Node node : ordered) {
-			NodePosition previous = previousPositions.get(node.path);
+			boolean underReset = resetPrefixes.stream().anyMatch(prefix -> node.path.startsWith(prefix + "/"));
+			NodePosition previous = underReset ? null : previousPositions.get(node.path);
 			int targetX = node.x;
 			int targetY = node.y;
-			if (previous != null) {
+			if (previous != null && Objects.equals(previous.structureKey(), node.getStructureKey())) {
 				targetX = previous.x();
 				targetY = previous.y();
 			} else {
+				if (previous != null) {
+					resetPrefixes.add(node.path);
+				}
 				MaterialTree.NodeOffset offset = BoM.tree.nodeOffsets.get(node.path);
 				if (offset != null) {
 					targetX = node.layoutX + offset.x();
@@ -277,59 +288,6 @@ public class BoMScreen extends Screen {
 				node.y += dy;
 			}
 		}
-	}
-
-	private void resolveNodeOverlaps() {
-		List<Node> ordered = nodes.stream()
-			.sorted(Comparator.comparingInt((Node n) -> n.y).thenComparingInt(n -> n.x))
-			.toList();
-		for (int pass = 0; pass < 6; pass++) {
-			boolean moved = false;
-			for (int i = 0; i < ordered.size(); i++) {
-				Node a = ordered.get(i);
-				for (int j = i + 1; j < ordered.size(); j++) {
-					Node b = ordered.get(j);
-					if (!nodesOverlap(a, b) || related(a, b)) {
-						continue;
-					}
-					Node anchorA = getMovableAnchor(a);
-					Node anchorB = getMovableAnchor(b);
-					if (anchorA == anchorB) {
-						continue;
-					}
-					int dx = getOverlapPush(a, b);
-					shiftSubtree(anchorB.path, dx, 0);
-					moved = true;
-				}
-			}
-			if (!moved) {
-				break;
-			}
-		}
-	}
-
-	private boolean related(Node a, Node b) {
-		return a.path.startsWith(b.path + "/") || b.path.startsWith(a.path + "/");
-	}
-
-	private Node getMovableAnchor(Node node) {
-		Node anchor = node;
-		while (anchor.parent != null && anchor.parent.parent != null) {
-			anchor = anchor.parent;
-		}
-		return anchor;
-	}
-
-	private boolean nodesOverlap(Node a, Node b) {
-		int padding = 6;
-		return a.getLeft() - padding < b.getRight() + padding
-			&& a.getRight() + padding > b.getLeft() - padding
-			&& a.getTop() - padding < b.getBottom() + padding
-			&& a.getBottom() + padding > b.getTop() - padding;
-	}
-
-	private int getOverlapPush(Node a, Node b) {
-		return Math.max(8, a.getRight() - b.getLeft() + 12);
 	}
 
 	private Bounds getLibraryPanelBounds() {
@@ -625,6 +583,18 @@ public class BoMScreen extends Screen {
 		contextMenuNodePath = null;
 	}
 
+	private String getNodePath(MaterialNode node) {
+		if (node == null) {
+			return null;
+		}
+		for (Node renderNode : nodes) {
+			if (renderNode.node == node) {
+				return renderNode.path;
+			}
+		}
+		return null;
+	}
+
 	private Bounds getContextMenuBounds() {
 		Node node = getContextMenuNode();
 		if (node == null) {
@@ -715,19 +685,19 @@ public class BoMScreen extends Screen {
 			switch (action) {
 				case COMPARE -> {
 					if (toggleComparison(node.node)) {
-						recalculateTree();
+						recalculateTree(node.path);
 					}
 				}
 				case AUTO -> {
 					Hover hover = new Hover(node.node.ingredient, node.node, node.resolution, node);
 					if (getAutoResolutions(hover, BoM.tree::addResolution)) {
-						recalculateTree();
+						recalculateTree(node.path);
 					}
 				}
 				case CLEAR -> {
 					BoM.tree.addResolution(node.node.ingredient, null);
 					node.node.clearComparisons();
-					recalculateTree();
+					recalculateTree(node.path);
 				}
 				case RECIPES -> {
 					EmiApi.displayRecipes(node.node.ingredient);
@@ -738,8 +708,14 @@ public class BoMScreen extends Screen {
 						EmiApi.focusRecipe(node.node.recipe);
 					}
 				}
-				case FOLD -> node.node.state = FoldState.COLLAPSED;
-				case UNFOLD -> node.node.state = FoldState.EXPANDED;
+				case FOLD -> {
+					node.node.state = FoldState.COLLAPSED;
+					recalculateTree(node.path);
+				}
+				case UNFOLD -> {
+					node.node.state = FoldState.EXPANDED;
+					recalculateTree(node.path);
+				}
 			}
 			closeContextMenu();
 			return true;
@@ -872,7 +848,7 @@ public class BoMScreen extends Screen {
 		return null;
 	}
 
-	private record NodePosition(int x, int y) {
+	private record NodePosition(int x, int y, String structureKey) {
 	}
 
 	private record LibraryRowButtons(Bounds save, Bounds rename, Bounds delete, Bounds override) {
@@ -1146,7 +1122,6 @@ public class BoMScreen extends Screen {
 			return true;
 		}
 		if (button == 0 && handleContextMenuClick((int) mouseX, (int) mouseY)) {
-			recalculateTree();
 			return true;
 		}
 		float scale = getScale();
@@ -1206,12 +1181,12 @@ public class BoMScreen extends Screen {
 				if (draggedNode.comparisonCandidate) {
 					if (selectComparison(draggedNode.compareOwner, draggedNode.node.recipe)) {
 						closeContextMenu();
-						recalculateTree();
+						recalculateTree(getNodePath(draggedNode.compareOwner));
 					}
 				} else if (lastNodeClickPath != null && lastNodeClickPath.equals(draggedNode.path) && now - lastNodeClickTime < 250) {
 					if (toggleComparison(draggedNode.node)) {
 						closeContextMenu();
-						recalculateTree();
+						recalculateTree(draggedNode.path);
 					}
 					lastNodeClickPath = null;
 					lastNodeClickTime = 0;
@@ -1602,6 +1577,11 @@ public class BoMScreen extends Screen {
 
 		public int getBottom() {
 			return y + 10;
+		}
+
+		public String getStructureKey() {
+			String recipeId = node.recipe != null && node.recipe.getId() != null ? node.recipe.getId().toString() : "none";
+			return recipeId + "|" + node.state.name() + "|" + node.hasComparisons();
 		}
 
 		public Hover getHover(int mouseX, int mouseY) {
