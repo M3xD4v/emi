@@ -66,6 +66,7 @@ public class BoMScreen extends Screen {
 	private static final int NODE_WIDTH = 30;
 	private static final int NODE_HORIZONTAL_SPACING = 8;
 	private static final int NODE_VERTICAL_SPACING = 20;
+	private static final int COMPARISON_HORIZONTAL_SPACING = 28;
 	private static final int COST_HORIZONTAL_SPACING = 8;
 	private static int zoom = 0;
 	private Bounds batches = new Bounds(-24, -50, 48, 26);
@@ -282,7 +283,7 @@ public class BoMScreen extends Screen {
 	}
 
 	private int getLibraryRowHeight() {
-		return compactLibrary ? 42 : 54;
+		return compactLibrary ? 48 : 60;
 	}
 
 	private int getLibraryVisibleRows() {
@@ -299,8 +300,9 @@ public class BoMScreen extends Screen {
 
 	private Bounds getLibraryButtonBounds(Bounds row, int right, String label) {
 		int width = Math.max(compactLibrary ? 36 : 44, textRenderer.getWidth(label) + (compactLibrary ? 10 : 16));
-		int height = compactLibrary ? 16 : 18;
-		return new Bounds(right - width, row.y() + row.height() / 2 - height / 2, width, height);
+		int height = compactLibrary ? 14 : 16;
+		int y = row.y() + row.height() - height - 6;
+		return new Bounds(right - width, y, width, height);
 	}
 
 	private Bounds getLibraryHeaderButton(Bounds panel) {
@@ -372,11 +374,10 @@ public class BoMScreen extends Screen {
 		context.fill(panel.x(), panel.y() + 30, panel.width(), 1, 0xAA56738F);
 		context.drawTextWithShadow(EmiPort.literal("Recipe Tree Library", Formatting.WHITE), panel.x() + 12, panel.y() + 10, -1);
 		renderLibraryAction(context, getLibraryHeaderButton(panel), compactLibrary ? "Comfort" : "Compact", true, mouseX, mouseY);
-		if (!compactLibrary) {
-			int hintWidth = getLibraryHeaderButton(panel).x() - (panel.x() + 150) - 8;
-			if (hintWidth > 40) {
-				context.drawTextWithShadow(trimLibraryText("Double-click to load", hintWidth, Formatting.DARK_GRAY), panel.x() + 150, panel.y() + 10, -1);
-			}
+		int hintX = panel.x() + 124;
+		int hintWidth = getLibraryHeaderButton(panel).x() - hintX - 8;
+		if (hintWidth > 36) {
+			context.drawTextWithShadow(trimLibraryText("Double-click to load", hintWidth, Formatting.DARK_GRAY), hintX, panel.y() + 10, -1);
 		}
 		int rowHeight = getLibraryRowHeight();
 		int firstRow = Math.max(0, (int) Math.floor(libraryScroll));
@@ -400,24 +401,24 @@ public class BoMScreen extends Screen {
 			context.fill(row.x(), row.y(), 3, row.height(), saved.hasMissingData() ? 0xFFE46B6B : selected ? 0xFFD8C27A : 0xFF8AB7D6);
 			LibraryRowButtons buttons = getLibraryRowButtons(row);
 			int thumbX = row.x() + 10;
-			int thumbY = row.y() + row.height() / 2 - 8;
+			int thumbY = row.y() + 7;
 			EmiIngredient thumbnail = saved.thumbnail == null ? EmiStack.EMPTY : saved.thumbnail;
 			if (!thumbnail.isEmpty()) {
 				thumbnail.render(raw, thumbX, thumbY, delta, 0);
 			}
 			int textX = thumbX + 24;
-			int textWidth = Math.max(40, buttons.save.x() - textX - 8);
+			int textWidth = Math.max(40, row.x() + row.width() - textX - 10);
 			String titleText = saved.isEmpty()
 				? (slot + 1) + ". Empty Slot"
 				: (slot + 1) + ". " + (saved.name.isBlank() ? getDefaultTreeName() : saved.name);
 			context.drawTextWithShadow(trimLibraryText(titleText, textWidth, saved.isEmpty() ? Formatting.DARK_GRAY : Formatting.WHITE),
-				textX, row.y() + (compactLibrary ? 8 : 9), -1);
+				textX, row.y() + 9, -1);
 			if (saved.hasMissingData()) {
 				context.drawTextWithShadow(trimLibraryText("Missing data", textWidth, Formatting.RED),
-					textX, row.y() + (compactLibrary ? 22 : 29), -1);
+					textX, row.y() + 22, -1);
 			} else if (!compactLibrary) {
 				context.drawTextWithShadow(trimLibraryText(saved.isEmpty() ? "Save current tree here" : "Stored tree snapshot", textWidth, Formatting.DARK_GRAY),
-					textX, row.y() + 29, -1);
+					textX, row.y() + 22, -1);
 			}
 			renderLibraryAction(context, buttons.save, "Save", canSaveToSlot(saved), mouseX, mouseY);
 			renderLibraryAction(context, buttons.rename, "Rename", !saved.isEmpty(), mouseX, mouseY);
@@ -873,7 +874,7 @@ public class BoMScreen extends Screen {
 				if (left == null) {
 					left = volume;
 				} else {
-					left.addToRight(volume);
+					left.addToRight(volume, COMPARISON_HORIZONTAL_SPACING);
 				}
 			}
 			if (left != null) {
@@ -1597,9 +1598,13 @@ public class BoMScreen extends Screen {
 		}
 
 		public void addToRight(TreeVolume other) {
-			int rOff = getRight(0) - other.getLeft(0) + NODE_HORIZONTAL_SPACING;
+			addToRight(other, NODE_HORIZONTAL_SPACING);
+		}
+
+		public void addToRight(TreeVolume other, int spacing) {
+			int rOff = getRight(0) - other.getLeft(0) + spacing;
 			for (int i = 1; i < getDepth() && i < other.getDepth(); i++) {
-				rOff = Math.max(rOff, getRight(i) - other.getLeft(i) + NODE_HORIZONTAL_SPACING);
+				rOff = Math.max(rOff, getRight(i) - other.getLeft(i) + spacing);
 			}
 			for (int i = 0; i < other.getDepth(); i++) {
 				if (i < getDepth()) {
