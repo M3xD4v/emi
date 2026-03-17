@@ -597,6 +597,8 @@ public class BoMScreen extends Screen {
 		if (node == null || node.comparisonCandidate) {
 			return;
 		}
+		context.push();
+		context.matrices().translate(0, 0, 600);
 		RenderSystem.disableDepthTest();
 		Bounds menu = getContextMenuBounds();
 		context.fill(menu.x() - 1, menu.y() - 1, menu.width() + 2, menu.height() + 2, 0xAA0E141B);
@@ -611,6 +613,7 @@ public class BoMScreen extends Screen {
 				bounds.x() + bounds.width() / 2, bounds.y() + 5);
 		}
 		RenderSystem.enableDepthTest();
+		context.pop();
 	}
 
 	private boolean handleContextMenuClick(int mouseX, int mouseY) {
@@ -733,7 +736,7 @@ public class BoMScreen extends Screen {
 		if (loadWarning) {
 			context.drawTextWithShadow(EmiPort.literal("Loaded recipe tree with missing data", Formatting.YELLOW), 8, 34, -1);
 		}
-		context.drawTextWithShadow(EmiPort.literal("RMB node: menu  |  LMB drag: move node  |  Ctrl+LMB drag: move branch  |  RMB drag background: pan", Formatting.DARK_GRAY),
+		context.drawTextWithShadow(EmiPort.literal("RMB node: menu  |  LMB drag: move node  |  Ctrl+LMB drag: move branch  |  MMB drag background: pan", Formatting.DARK_GRAY),
 			8, height - 28, -1);
 		if (libraryOpen) {
 			libraryScroll += (libraryScrollTarget - libraryScroll) * 0.35f;
@@ -765,7 +768,7 @@ public class BoMScreen extends Screen {
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Right click node: open menu", Formatting.GRAY)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Left drag: move node", Formatting.GRAY)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Left drag: move branch", Formatting.GRAY)));
-			list.add(EmiTooltipComponents.of(EmiPort.literal("Right drag on background: pan view", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Middle drag on background: pan view", Formatting.GRAY)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Left click compare candidate: select recipe", Formatting.GRAY)));
 			EmiRenderHelper.drawTooltip(this, context, list, width - 18, height - 18, width);
 		}
@@ -1095,13 +1098,13 @@ public class BoMScreen extends Screen {
 				BoM.tree.batches = ideal;
 				recalculateTree();
 			}
-		} else if (button == 1) {
+		} else if (button == 2) {
 			closeContextMenu();
 			panningView = true;
 			dragLastTreeX = mx;
 			dragLastTreeY = my;
 			return true;
-		} else if (button == 0 || button == 1) {
+		} else if (button == 0 || button == 1 || button == 2) {
 			closeContextMenu();
 		}
 		Function<EmiBind, Boolean> function = bind -> bind.matchesMouse(button);
@@ -1124,11 +1127,11 @@ public class BoMScreen extends Screen {
 			draggedNodeMoved = false;
 			return true;
 		}
-		if (button == 1 && panningView) {
+		if (button == 2 && panningView) {
 			panningView = false;
 			return true;
 		}
-		if (button == 1 && draggedNode != null) {
+		if (button == 2 && draggedNode != null) {
 			draggedNode = null;
 			draggingBranch = false;
 			draggedNodeMoved = false;
@@ -1189,7 +1192,7 @@ public class BoMScreen extends Screen {
 			moveDraggedNode(dx, dy);
 			return true;
 		}
-		if (button == 1 && panningView) {
+		if (button == 2 && panningView) {
 			float scale = getScale();
 			offX += deltaX / scale;
 			offY += deltaY / scale;
