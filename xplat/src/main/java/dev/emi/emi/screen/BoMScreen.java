@@ -99,6 +99,8 @@ public class BoMScreen extends Screen {
 	private TextFieldWidget renameField;
 	private long lastLibraryClickTime = 0;
 	private int lastLibraryClickSlot = -1;
+	private long lastNodeClickTime = 0;
+	private String lastNodeClickPath = null;
 	private String contextMenuNodePath = null;
 	private int contextMenuX = 0;
 	private int contextMenuY = 0;
@@ -153,6 +155,7 @@ public class BoMScreen extends Screen {
 				node.layoutY = node.y;
 			}
 			applyAnchoredPositions(previousPositions);
+			resolveNodeOverlaps();
 			if (!volume.nodes.isEmpty()) {
 				Node node = volume.nodes.get(0);
 				int width = textRenderer.getWidth("x" + BoM.tree.batches);
@@ -274,6 +277,59 @@ public class BoMScreen extends Screen {
 				node.y += dy;
 			}
 		}
+	}
+
+	private void resolveNodeOverlaps() {
+		List<Node> ordered = nodes.stream()
+			.sorted(Comparator.comparingInt((Node n) -> n.y).thenComparingInt(n -> n.x))
+			.toList();
+		for (int pass = 0; pass < 6; pass++) {
+			boolean moved = false;
+			for (int i = 0; i < ordered.size(); i++) {
+				Node a = ordered.get(i);
+				for (int j = i + 1; j < ordered.size(); j++) {
+					Node b = ordered.get(j);
+					if (!nodesOverlap(a, b) || related(a, b)) {
+						continue;
+					}
+					Node anchorA = getMovableAnchor(a);
+					Node anchorB = getMovableAnchor(b);
+					if (anchorA == anchorB) {
+						continue;
+					}
+					int dx = getOverlapPush(a, b);
+					shiftSubtree(anchorB.path, dx, 0);
+					moved = true;
+				}
+			}
+			if (!moved) {
+				break;
+			}
+		}
+	}
+
+	private boolean related(Node a, Node b) {
+		return a.path.startsWith(b.path + "/") || b.path.startsWith(a.path + "/");
+	}
+
+	private Node getMovableAnchor(Node node) {
+		Node anchor = node;
+		while (anchor.parent != null && anchor.parent.parent != null) {
+			anchor = anchor.parent;
+		}
+		return anchor;
+	}
+
+	private boolean nodesOverlap(Node a, Node b) {
+		int padding = 6;
+		return a.getLeft() - padding < b.getRight() + padding
+			&& a.getRight() + padding > b.getLeft() - padding
+			&& a.getTop() - padding < b.getBottom() + padding
+			&& a.getBottom() + padding > b.getTop() - padding;
+	}
+
+	private int getOverlapPush(Node a, Node b) {
+		return Math.max(8, a.getRight() - b.getLeft() + 12);
 	}
 
 	private Bounds getLibraryPanelBounds() {
@@ -1145,9 +1201,24 @@ public class BoMScreen extends Screen {
 	@Override
 	public boolean mouseReleased(double mouseX, double mouseY, int button) {
 		if (button == 0 && draggedNode != null) {
-			if (!draggedNodeMoved && draggedNode.comparisonCandidate && selectComparison(draggedNode.compareOwner, draggedNode.node.recipe)) {
-				closeContextMenu();
-				recalculateTree();
+			if (!draggedNodeMoved) {
+				long now = System.currentTimeMillis();
+				if (draggedNode.comparisonCandidate) {
+					if (selectComparison(draggedNode.compareOwner, draggedNode.node.recipe)) {
+						closeContextMenu();
+						recalculateTree();
+					}
+				} else if (lastNodeClickPath != null && lastNodeClickPath.equals(draggedNode.path) && now - lastNodeClickTime < 250) {
+					if (toggleComparison(draggedNode.node)) {
+						closeContextMenu();
+						recalculateTree();
+					}
+					lastNodeClickPath = null;
+					lastNodeClickTime = 0;
+				} else {
+					lastNodeClickPath = draggedNode.path;
+					lastNodeClickTime = now;
+				}
 			}
 			draggedNode = null;
 			draggingBranch = false;
@@ -1515,6 +1586,22 @@ public class BoMScreen extends Screen {
 			} else {
 				return EmiRenderHelper.getAmountText(node.ingredient, amount);
 			}
+		}
+
+		public int getLeft() {
+			return x - width / 2;
+		}
+
+		public int getRight() {
+			return x + width / 2;
+		}
+
+		public int getTop() {
+			return y - 11;
+		}
+
+		public int getBottom() {
+			return y + 10;
 		}
 
 		public Hover getHover(int mouseX, int mouseY) {
