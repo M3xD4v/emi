@@ -2630,7 +2630,8 @@ public class BoMScreen extends Screen {
 		if (editingCheckList.entries.isEmpty()) {
 			editingCheckList.entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
 		}
-		editingCheckListRow = MathHelper.clamp(editingCheckListRow, 0, editingCheckList.entries.size() - 1);
+		editingCheckListRow = 0;
+		editingCheckListScroll = 0;
 		updateCheckListEditorFields();
 	}
 
@@ -2914,11 +2915,7 @@ public class BoMScreen extends Screen {
 		if (getCheckListEditorButtonBounds(panel, 1, 0, "Link Tree").contains(mouseX, mouseY)) {
 			PureRefProject.TreeObject tree = getChecklistTargetTree();
 			if (tree != null) {
-				editingCheckList.linkedTreeObjectId = tree.id;
-				if (editingCheckList.title == null || editingCheckList.title.isBlank() || "Checklist".equals(editingCheckList.title)) {
-					editingCheckList.title = (tree.title == null || tree.title.isBlank() ? "Checklist" : tree.title) + " Checklist";
-				}
-				markBoardDirty();
+				populateCheckListFromTree(editingCheckList, tree, true);
 			}
 			return true;
 		}
@@ -3314,20 +3311,16 @@ public class BoMScreen extends Screen {
 	}
 
 	private void applyPreviewNodeOffsets(List<Node> previewNodes, MaterialTree tree) {
-		List<Map.Entry<String, MaterialTree.NodeOffset>> offsets = tree.nodeOffsets.entrySet().stream()
-			.sorted(Map.Entry.comparingByKey(Comparator.comparingInt(String::length)))
-			.toList();
-		for (Map.Entry<String, MaterialTree.NodeOffset> entry : offsets) {
+		Map<String, Node> byPath = previewNodes.stream().collect(Collectors.toMap(n -> n.path, Function.identity(), (a, b) -> a));
+		for (Map.Entry<String, MaterialTree.NodeOffset> entry : tree.nodeOffsets.entrySet()) {
 			MaterialTree.NodeOffset offset = entry.getValue();
 			if (offset == null || (offset.x() == 0 && offset.y() == 0)) {
 				continue;
 			}
-			String path = entry.getKey();
-			for (Node node : previewNodes) {
-				if (node.path.equals(path) || node.path.startsWith(path + "/")) {
-					node.x += offset.x();
-					node.y += offset.y();
-				}
+			Node node = byPath.get(entry.getKey());
+			if (node != null) {
+				node.x += offset.x();
+				node.y += offset.y();
 			}
 		}
 	}
