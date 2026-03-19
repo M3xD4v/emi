@@ -27,6 +27,7 @@ import net.minecraft.util.JsonHelper;
 
 public class BoM {
 	public static final int TREE_SLOT_COUNT = 50;
+	public static final int PURE_REF_SLOT_COUNT = 50;
 	private static RecipeDefaults defaults = new RecipeDefaults();
 	public static MaterialTree tree;
 	public static Map<EmiIngredient, EmiRecipe> defaultRecipes = Maps.newHashMap();
@@ -35,6 +36,9 @@ public class BoM {
 	public static boolean craftingMode = false;
 	public static java.util.List<SavedRecipeTree> savedTrees = IntStream.range(0, TREE_SLOT_COUNT)
 		.mapToObj(SavedRecipeTree::empty).collect(java.util.stream.Collectors.toList());
+	public static java.util.List<PureRefProject> savedPureRefProjects = IntStream.range(0, PURE_REF_SLOT_COUNT)
+		.mapToObj(PureRefProject::empty).collect(java.util.stream.Collectors.toList());
+	public static PureRefProject pureRefProject = PureRefProject.workingCopy();
 
 	public static void setDefaults(RecipeDefaults defaults) {
 		BoM.defaults = defaults;
@@ -101,6 +105,16 @@ public class BoM {
 		return arr;
 	}
 
+	public static JsonArray savePureRefProjects() {
+		JsonArray arr = new JsonArray();
+		for (PureRefProject project : savedPureRefProjects) {
+			if (!project.isEmpty()) {
+				arr.add(project.save());
+			}
+		}
+		return arr;
+	}
+
 	public static void loadAdded(JsonObject object) {
 		addedRecipes.clear();
 		disabledRecipes.clear();
@@ -151,6 +165,19 @@ public class BoM {
 				SavedRecipeTree tree = SavedRecipeTree.load(el.getAsJsonObject());
 				if (tree.slot >= 0 && tree.slot < savedTrees.size()) {
 					savedTrees.set(tree.slot, tree);
+				}
+			}
+		}
+	}
+
+	public static void loadPureRefProjects(JsonArray array) {
+		savedPureRefProjects = IntStream.range(0, PURE_REF_SLOT_COUNT).mapToObj(PureRefProject::empty)
+			.collect(java.util.stream.Collectors.toList());
+		for (JsonElement el : array) {
+			if (el.isJsonObject()) {
+				PureRefProject project = PureRefProject.load(el.getAsJsonObject());
+				if (project.slot >= 0 && project.slot < savedPureRefProjects.size()) {
+					savedPureRefProjects.set(project.slot, project);
 				}
 			}
 		}
@@ -239,6 +266,50 @@ public class BoM {
 			return new SavedRecipeTree.LoadResult(false, false);
 		}
 		return tree.snapshot.loadIntoBoM();
+	}
+
+	public static PureRefProject getSavedPureRefProject(int slot) {
+		if (slot < 0 || slot >= savedPureRefProjects.size()) {
+			return PureRefProject.empty(slot);
+		}
+		return savedPureRefProjects.get(slot);
+	}
+
+	public static void savePureRefProject(int slot, PureRefProject project) {
+		if (slot < 0 || slot >= savedPureRefProjects.size()) {
+			return;
+		}
+		PureRefProject copy = project.copy();
+		PureRefProject stored = new PureRefProject(slot, copy.name, copy.offX, copy.offY, copy.zoom);
+		stored.objects.addAll(copy.objects);
+		savedPureRefProjects.set(slot, stored);
+		EmiPersistentData.save();
+	}
+
+	public static void renameSavedPureRefProject(int slot, String name) {
+		if (slot < 0 || slot >= savedPureRefProjects.size()) {
+			return;
+		}
+		PureRefProject project = savedPureRefProjects.get(slot);
+		project.name = name;
+		EmiPersistentData.save();
+	}
+
+	public static void deleteSavedPureRefProject(int slot) {
+		if (slot < 0 || slot >= savedPureRefProjects.size()) {
+			return;
+		}
+		savedPureRefProjects.set(slot, PureRefProject.empty(slot));
+		EmiPersistentData.save();
+	}
+
+	public static boolean loadSavedPureRefProject(int slot) {
+		if (slot < 0 || slot >= savedPureRefProjects.size()) {
+			return false;
+		}
+		PureRefProject project = savedPureRefProjects.get(slot);
+		pureRefProject = project.copy();
+		return true;
 	}
 
 	public static void addResolution(EmiIngredient ingredient, EmiRecipe recipe) {

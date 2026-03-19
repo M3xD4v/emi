@@ -83,6 +83,16 @@ public class SavedRecipeTree {
 		}
 	}
 
+	public static class TreeBuildResult {
+		public final @Nullable MaterialTree tree;
+		public final boolean missingData;
+
+		public TreeBuildResult(@Nullable MaterialTree tree, boolean missingData) {
+			this.tree = tree;
+			this.missingData = missingData;
+		}
+	}
+
 	public static class RecipeTreeSnapshot {
 		public final Identifier rootRecipeId;
 		public final long batches;
@@ -134,9 +144,20 @@ public class SavedRecipeTree {
 		}
 
 		public LoadResult loadIntoBoM() {
+			TreeBuildResult result = buildTree();
+			if (result.tree == null) {
+				return new LoadResult(false, result.missingData);
+			}
+			MaterialTree tree = result.tree;
+			BoM.tree = tree;
+			BoM.craftingMode = craftingMode;
+			return new LoadResult(true, result.missingData);
+		}
+
+		public TreeBuildResult buildTree() {
 			EmiRecipe rootRecipe = EmiApi.getRecipeManager().getRecipe(rootRecipeId);
 			if (rootRecipe == null) {
-				return new LoadResult(false, true);
+				return new TreeBuildResult(null, true);
 			}
 			MaterialTree tree = new MaterialTree(rootRecipe);
 			ApplyResult result = root.apply(tree.goal, tree, "0");
@@ -144,9 +165,7 @@ public class SavedRecipeTree {
 			tree.snapshotOffX = offX;
 			tree.snapshotOffY = offY;
 			tree.snapshotZoom = zoom;
-			BoM.tree = tree;
-			BoM.craftingMode = craftingMode;
-			return new LoadResult(true, result.missingData);
+			return new TreeBuildResult(tree, result.missingData);
 		}
 
 		public boolean hasMissingData() {

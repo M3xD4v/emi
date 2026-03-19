@@ -36,6 +36,7 @@ import dev.emi.emi.bom.FoldState;
 import dev.emi.emi.bom.MaterialNode;
 import dev.emi.emi.bom.MaterialTree;
 import dev.emi.emi.bom.ProgressState;
+import dev.emi.emi.bom.PureRefProject;
 import dev.emi.emi.bom.SavedRecipeTree;
 import dev.emi.emi.bom.TreeCost;
 import dev.emi.emi.config.EmiConfig;
@@ -61,6 +62,7 @@ import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.MutableText;
+import net.minecraft.text.OrderedText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.MathHelper;
@@ -71,6 +73,9 @@ public class BoMScreen extends Screen {
 	private static final int NODE_VERTICAL_SPACING = 20;
 	private static final int COMPARISON_HORIZONTAL_SPACING = 28;
 	private static final int COST_HORIZONTAL_SPACING = 8;
+	private static final int PURE_REF_NOTE_WRAP_WIDTH = 260;
+	private static final int BOARD_TREE_HEADER_HEIGHT = 18;
+	private static final int BOARD_TREE_FOOTER_HEIGHT = 22;
 	private static int zoom = 0;
 	private Bounds batches = new Bounds(-24, -50, 48, 26);
 	private Bounds mode = new Bounds(-24, -50, 16, 16);
@@ -78,7 +83,11 @@ public class BoMScreen extends Screen {
 	private double offX, offY;
 	private List<Node> nodes = Lists.newArrayList();
 	private List<Cost> costs = Lists.newArrayList();
+	private ButtonWidget modeToggleButton;
 	private ButtonWidget libraryButton;
+	private ButtonWidget projectButton;
+	private ButtonWidget insertButton;
+	private ButtonWidget backToBoardButton;
 	private EmiPlayerInventory playerInv;
 	private boolean hasRemainders = false;;
 	public HandledScreen<?> old;
@@ -107,6 +116,44 @@ public class BoMScreen extends Screen {
 	private String contextMenuNodePath = null;
 	private int contextMenuX = 0;
 	private int contextMenuY = 0;
+	private ViewMode viewMode = ViewMode.TREE;
+	private PureRefTool pureRefTool = PureRefTool.SELECT;
+	private boolean projectLibraryOpen = false;
+	private boolean insertOverlayOpen = false;
+	private float projectScroll = 0;
+	private float projectScrollTarget = 0;
+	private int selectedProjectSlot = -1;
+	private int renamingProjectSlot = -1;
+	private TextFieldWidget projectRenameField;
+	private PureRefProject.Object selectedPureRefObject = null;
+	private PureRefProject.NoteObject editingNote = null;
+	private List<String> editingNoteLines = Lists.newArrayList();
+	private int editingNoteCursorLine = 0;
+	private int editingNoteCursorColumn = 0;
+	private boolean pureRefPanning = false;
+	private boolean pureRefDraggingObject = false;
+	private boolean pureRefResizingNote = false;
+	private boolean pureRefResizingTree = false;
+	private boolean pureRefCreatingShape = false;
+	private boolean pureRefObjectMoved = false;
+	private int pureRefDragLastX = 0;
+	private int pureRefDragLastY = 0;
+	private long lastPureRefClickTime = 0;
+	private String lastPureRefClickId = null;
+	private PureRefProject.ShapeObject activeShapeDraft = null;
+	private PureRefProject.ShapeObject editingShape = null;
+	private PureRefProject.TreeObject pendingTreeInsert = null;
+	private PureRefProject.NoteObject pendingNoteDelete = null;
+	private ShapeHandle activeShapeHandle = ShapeHandle.NONE;
+	private PureRefProject.TreeObject focusedPureRefTree = null;
+	private MaterialTree previousFocusedTree = null;
+	private boolean previousFocusedCraftingMode = false;
+	private double pureRefBoardOffX = 0;
+	private double pureRefBoardOffY = 0;
+	private int pureRefBoardZoom = 0;
+	private double storedTreeOffX = 0;
+	private double storedTreeOffY = 0;
+	private int storedTreeZoom = 0;
 
 	public BoMScreen(HandledScreen<?> old) {
 		super(EmiPort.translatable("screen.emi.recipe_tree"));
@@ -115,18 +162,71 @@ public class BoMScreen extends Screen {
 
 	public void init() {
 		this.clearChildren();
+		modeToggleButton = EmiPort.newButton(8, 8, 92, 20, EmiPort.literal(viewMode == ViewMode.TREE ? "Board View" : "Tree View"), button -> {
+			if (focusedPureRefTree != null) {
+				exitPureRefTreeFocus(true);
+			}
+			if (viewMode == ViewMode.TREE) {
+				storedTreeOffX = offX;
+				storedTreeOffY = offY;
+				storedTreeZoom = zoom;
+				viewMode = ViewMode.PURE_REF;
+				offX = BoM.pureRefProject.offX;
+				offY = BoM.pureRefProject.offY;
+				zoom = BoM.pureRefProject.zoom;
+			} else {
+				BoM.pureRefProject.offX = offX;
+				BoM.pureRefProject.offY = offY;
+				BoM.pureRefProject.zoom = zoom;
+				viewMode = ViewMode.TREE;
+				offX = storedTreeOffX;
+				offY = storedTreeOffY;
+				zoom = storedTreeZoom;
+			}
+			closeContextMenu();
+			projectLibraryOpen = false;
+			insertOverlayOpen = false;
+			recalculateTree();
+			syncTopButtons();
+		});
+		this.addDrawableChild(modeToggleButton);
 		libraryButton = EmiPort.newButton(width - 110, 8, 102, 20, EmiPort.literal("Tree Library"), button -> {
 			libraryOpen = !libraryOpen;
+			projectLibraryOpen = false;
+			insertOverlayOpen = false;
 			renamingSlot = -1;
 			libraryScrollTarget = MathHelper.clamp(libraryScrollTarget, 0, getLibraryMaxScroll());
 			libraryScroll = MathHelper.clamp(libraryScroll, 0, getLibraryMaxScroll());
 			updateRenameField();
 		});
 		this.addDrawableChild(libraryButton);
+		projectButton = EmiPort.newButton(width - 214, 8, 96, 20, EmiPort.literal("Projects"), button -> {
+			projectLibraryOpen = !projectLibraryOpen;
+			libraryOpen = false;
+			insertOverlayOpen = false;
+			renamingProjectSlot = -1;
+			updateProjectRenameField();
+		});
+		this.addDrawableChild(projectButton);
+		insertButton = EmiPort.newButton(width - 110, 8, 96, 20, EmiPort.literal("Insert Tree"), button -> {
+			insertOverlayOpen = !insertOverlayOpen;
+			projectLibraryOpen = false;
+			libraryOpen = false;
+		});
+		this.addDrawableChild(insertButton);
+		backToBoardButton = EmiPort.newButton(width - 118, 8, 110, 20, EmiPort.literal("Back To Board"), button -> {
+			exitPureRefTreeFocus(true);
+			syncTopButtons();
+		});
+		this.addDrawableChild(backToBoardButton);
 		renameField = new TextFieldWidget(textRenderer, 0, 0, 180, 18, EmiPort.literal(""));
 		renameField.setMaxLength(64);
 		renameField.setVisible(false);
 		this.addDrawableChild(renameField);
+		projectRenameField = new TextFieldWidget(textRenderer, 0, 0, 200, 18, EmiPort.literal(""));
+		projectRenameField.setMaxLength(64);
+		projectRenameField.setVisible(false);
+		this.addDrawableChild(projectRenameField);
 		if (BoM.tree != null) {
 			if (!Double.isNaN(BoM.tree.snapshotOffX) && !Double.isNaN(BoM.tree.snapshotOffY)) {
 				offX = BoM.tree.snapshotOffX;
@@ -141,11 +241,46 @@ public class BoMScreen extends Screen {
 		} else {
 			offY = 0;
 		}
+		syncTopButtons();
+		updateProjectRenameField();
+		updateNoteEditorFields();
 		recalculateTree();
 	}
 
 	public void recalculateTree() {
 		recalculateTree(null);
+	}
+
+	private boolean isTreeViewportActive() {
+		return viewMode == ViewMode.TREE || focusedPureRefTree != null;
+	}
+
+	private void syncTopButtons() {
+		if (modeToggleButton != null) {
+			modeToggleButton.setMessage(EmiPort.literal(viewMode == ViewMode.TREE ? "Board View" : "Tree View"));
+			modeToggleButton.visible = focusedPureRefTree == null;
+			modeToggleButton.active = focusedPureRefTree == null;
+		}
+		if (libraryButton != null) {
+			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
+			libraryButton.visible = visible;
+			libraryButton.active = visible;
+		}
+		if (projectButton != null) {
+			boolean visible = viewMode == ViewMode.PURE_REF && focusedPureRefTree == null;
+			projectButton.visible = visible;
+			projectButton.active = visible;
+		}
+		if (insertButton != null) {
+			boolean visible = viewMode == ViewMode.PURE_REF && focusedPureRefTree == null;
+			insertButton.visible = visible;
+			insertButton.active = visible;
+		}
+		if (backToBoardButton != null) {
+			boolean visible = focusedPureRefTree != null;
+			backToBoardButton.visible = visible;
+			backToBoardButton.active = visible;
+		}
 	}
 
 	public void recalculateTree(String resetPath) {
@@ -477,6 +612,275 @@ public class BoMScreen extends Screen {
 		return !slot.isEmpty() && createSnapshot() != null;
 	}
 
+	private Bounds getProjectPanelBounds() {
+		int panelWidth = Math.min(408, width - 24);
+		int panelHeight = Math.min(356, height - 56);
+		return new Bounds(width - panelWidth - 12, 36, panelWidth, panelHeight);
+	}
+
+	private int getProjectRowHeight() {
+		return 52;
+	}
+
+	private int getProjectVisibleRows() {
+		return Math.max(1, (getProjectPanelBounds().height() - 78) / getProjectRowHeight() + 1);
+	}
+
+	private int getProjectMaxScroll() {
+		return Math.max(0, BoM.PURE_REF_SLOT_COUNT - getProjectVisibleRows());
+	}
+
+	private Bounds getProjectRowBounds(Bounds panel, int visibleIndex) {
+		return new Bounds(panel.x() + 12, panel.y() + 40 + visibleIndex * getProjectRowHeight(), panel.width() - 24, getProjectRowHeight() - 6);
+	}
+
+	private Bounds getProjectHeaderButton(Bounds panel) {
+		return new Bounds(panel.x() + panel.width() - 86, panel.y() + 7, 74, 18);
+	}
+
+	private Bounds getProjectButtonBounds(Bounds row, int right, String label) {
+		int width = Math.max(42, textRenderer.getWidth(label) + 14);
+		int y = row.y() + row.height() - 20;
+		return new Bounds(right - width, y, width, 16);
+	}
+
+	private LibraryRowButtons getProjectRowButtons(Bounds row) {
+		int right = row.x() + row.width() - 10;
+		Bounds override = getProjectButtonBounds(row, right, "Override");
+		right = override.x() - 6;
+		Bounds delete = getProjectButtonBounds(row, right, "Delete");
+		right = delete.x() - 6;
+		Bounds rename = getProjectButtonBounds(row, right, "Rename");
+		right = rename.x() - 6;
+		Bounds save = getProjectButtonBounds(row, right, "Save");
+		return new LibraryRowButtons(save, rename, delete, override);
+	}
+
+	private void updateProjectRenameField() {
+		if (projectRenameField == null) {
+			return;
+		}
+		boolean wasVisible = projectRenameField.isVisible();
+		if (!projectLibraryOpen || renamingProjectSlot < 0 || renamingProjectSlot >= BoM.PURE_REF_SLOT_COUNT) {
+			projectRenameField.setVisible(false);
+			projectRenameField.setFocused(false);
+			return;
+		}
+		Bounds panel = getProjectPanelBounds();
+		projectRenameField.setVisible(true);
+		projectRenameField.setX(panel.x() + 12);
+		projectRenameField.setY(panel.y() + panel.height() - 26);
+		projectRenameField.setWidth(panel.width() - 24);
+		if (!wasVisible) {
+			projectRenameField.setText(BoM.getSavedPureRefProject(renamingProjectSlot).name);
+			projectRenameField.setFocused(true);
+		}
+	}
+
+	private void commitProjectRename() {
+		if (renamingProjectSlot >= 0 && projectRenameField != null) {
+			BoM.renameSavedPureRefProject(renamingProjectSlot, projectRenameField.getText().trim());
+		}
+		renamingProjectSlot = -1;
+		updateProjectRenameField();
+	}
+
+	private String getDefaultProjectName() {
+		String name = BoM.pureRefProject.name;
+		if (name != null && !name.isBlank()) {
+			return name;
+		}
+		return "Project";
+	}
+
+	private void saveProjectToSlot(int slot, boolean override) {
+		PureRefProject existing = BoM.getSavedPureRefProject(slot);
+		if (!override && !existing.isEmpty()) {
+			return;
+		}
+		PureRefProject project = BoM.pureRefProject.copy();
+		if (project.name == null || project.name.isBlank()) {
+			project.name = getDefaultProjectName();
+		}
+		project.offX = offX;
+		project.offY = offY;
+		project.zoom = zoom;
+		BoM.savePureRefProject(slot, project);
+		selectedProjectSlot = slot;
+	}
+
+	private void renderProjectOverlay(EmiDrawContext context, int mouseX, int mouseY) {
+		context.push();
+		context.matrices().translate(0, 0, 500);
+		RenderSystem.disableDepthTest();
+		Bounds panel = getProjectPanelBounds();
+		context.fill(panel.x() - 6, panel.y() - 6, panel.width() + 12, panel.height() + 12, 0x33000000);
+		context.fill(panel.x() - 1, panel.y() - 1, panel.width() + 2, panel.height() + 2, 0x99476335);
+		context.fill(panel.x(), panel.y(), panel.width(), panel.height(), 0xF1161B14);
+		context.fill(panel.x(), panel.y(), panel.width(), 30, 0xFF2C221B);
+		context.drawTextWithShadow(EmiPort.literal("Board Projects", Formatting.WHITE), panel.x() + 12, panel.y() + 10, -1);
+		renderLibraryAction(context, getProjectHeaderButton(panel), "Current", true, mouseX, mouseY);
+		int firstRow = Math.max(0, (int) Math.floor(projectScroll));
+		float rowOffset = projectScroll - firstRow;
+		int visibleRows = getProjectVisibleRows();
+		for (int i = 0; i < visibleRows + 1; i++) {
+			int slot = firstRow + i;
+			if (slot >= BoM.PURE_REF_SLOT_COUNT) {
+				break;
+			}
+			PureRefProject project = BoM.getSavedPureRefProject(slot);
+			Bounds row = getProjectRowBounds(panel, i);
+			row = new Bounds(row.x(), row.y() - Math.round(rowOffset * getProjectRowHeight()), row.width(), row.height());
+			if (row.y() + row.height() < panel.y() + 32 || row.y() > panel.y() + panel.height() - 40) {
+				continue;
+			}
+			boolean hovered = row.contains(mouseX, mouseY);
+			boolean selected = selectedProjectSlot == slot;
+			context.fill(row.x(), row.y(), row.width(), row.height(), hovered ? 0xFF3A3128 : selected ? 0xFF302922 : 0xCC241D18);
+			context.fill(row.x(), row.y(), 3, row.height(), selected ? 0xFFD8C27A : 0xFFB58C62);
+			String title = project.isEmpty() ? (slot + 1) + ". Empty Project" : (slot + 1) + ". " + (project.name == null || project.name.isBlank() ? "Project" : project.name);
+			context.drawTextWithShadow(trimLibraryText(title, row.width() - 160, project.isEmpty() ? Formatting.DARK_GRAY : Formatting.WHITE),
+				row.x() + 10, row.y() + 8, -1);
+			String summary = project.isEmpty() ? "Save current board here" : project.objects.size() + " objects";
+			context.drawTextWithShadow(trimLibraryText(summary, row.width() - 160, Formatting.DARK_GRAY), row.x() + 10, row.y() + 22, -1);
+			LibraryRowButtons buttons = getProjectRowButtons(row);
+			renderLibraryAction(context, buttons.save, "Save", true, mouseX, mouseY);
+			renderLibraryAction(context, buttons.rename, "Rename", !project.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.delete, "Delete", !project.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.override, "Override", !project.isEmpty(), mouseX, mouseY);
+		}
+		RenderSystem.enableDepthTest();
+		context.pop();
+	}
+
+	private boolean handleProjectOverlayClick(double mouseX, double mouseY, int button) {
+		if (!projectLibraryOpen || button != 0) {
+			return false;
+		}
+		Bounds panel = getProjectPanelBounds();
+		if (!panel.contains((int) mouseX, (int) mouseY)) {
+			renamingProjectSlot = -1;
+			updateProjectRenameField();
+			return false;
+		}
+		int firstRow = Math.max(0, (int) Math.floor(projectScroll));
+		float rowOffset = projectScroll - firstRow;
+		int visibleRows = getProjectVisibleRows();
+		for (int i = 0; i < visibleRows + 1; i++) {
+			int slot = firstRow + i;
+			if (slot >= BoM.PURE_REF_SLOT_COUNT) {
+				break;
+			}
+			PureRefProject project = BoM.getSavedPureRefProject(slot);
+			Bounds row = getProjectRowBounds(panel, i);
+			row = new Bounds(row.x(), row.y() - Math.round(rowOffset * getProjectRowHeight()), row.width(), row.height());
+			if (!row.contains((int) mouseX, (int) mouseY)) {
+				continue;
+			}
+			LibraryRowButtons buttons = getProjectRowButtons(row);
+			if (buttons.save.contains((int) mouseX, (int) mouseY)) {
+				saveProjectToSlot(slot, false);
+				return true;
+			}
+			if (buttons.rename.contains((int) mouseX, (int) mouseY) && !project.isEmpty()) {
+				selectedProjectSlot = slot;
+				renamingProjectSlot = slot;
+				updateProjectRenameField();
+				return true;
+			}
+			if (buttons.delete.contains((int) mouseX, (int) mouseY) && !project.isEmpty()) {
+				BoM.deleteSavedPureRefProject(slot);
+				selectedProjectSlot = Math.min(slot, BoM.PURE_REF_SLOT_COUNT - 1);
+				return true;
+			}
+			if (buttons.override.contains((int) mouseX, (int) mouseY) && !project.isEmpty()) {
+				saveProjectToSlot(slot, true);
+				return true;
+			}
+			long now = System.currentTimeMillis();
+			selectedProjectSlot = slot;
+			if (!project.isEmpty() && lastLibraryClickSlot == slot && now - lastLibraryClickTime < 250) {
+				if (BoM.loadSavedPureRefProject(slot)) {
+					offX = BoM.pureRefProject.offX;
+					offY = BoM.pureRefProject.offY;
+					zoom = BoM.pureRefProject.zoom;
+				}
+			}
+			lastLibraryClickSlot = slot;
+			lastLibraryClickTime = now;
+			return true;
+		}
+		return true;
+	}
+
+	private Bounds getInsertOverlayBounds() {
+		int panelWidth = Math.min(320, width - 24);
+		int panelHeight = Math.min(300, height - 56);
+		return new Bounds(12, 36, panelWidth, panelHeight);
+	}
+
+	private void renderInsertOverlay(EmiDrawContext context, DrawContext raw, int mouseX, int mouseY, float delta) {
+		context.push();
+		context.matrices().translate(0, 0, 500);
+		RenderSystem.disableDepthTest();
+		Bounds panel = getInsertOverlayBounds();
+		context.fill(panel.x() - 4, panel.y() - 4, panel.width() + 8, panel.height() + 8, 0x33000000);
+		context.fill(panel.x(), panel.y(), panel.width(), panel.height(), 0xF1151A23);
+		context.fill(panel.x(), panel.y(), panel.width(), 30, 0xFF1D2A38);
+		context.drawTextWithShadow(EmiPort.literal("Insert Saved Tree", Formatting.WHITE), panel.x() + 12, panel.y() + 10, -1);
+		int y = panel.y() + 38;
+		boolean foundAny = false;
+		for (int i = 0; i < BoM.TREE_SLOT_COUNT && y < panel.y() + panel.height() - 24; i++) {
+			SavedRecipeTree saved = BoM.getSavedTree(i);
+			if (saved.isEmpty()) {
+				continue;
+			}
+			foundAny = true;
+			String title = (i + 1) + ". " + (saved.name == null || saved.name.isBlank() ? "Saved Tree" : saved.name);
+			renderInsertRow(context, raw, new Bounds(panel.x() + 10, y, panel.width() - 20, 24), saved.thumbnail, title, mouseX, mouseY, delta);
+			y += 28;
+		}
+		if (!foundAny) {
+			context.drawTextWithShadow(EmiPort.literal("No saved recipe trees available", Formatting.GRAY), panel.x() + 12, panel.y() + 42, -1);
+			context.drawTextWithShadow(EmiPort.literal("Save a tree in Tree View first", Formatting.DARK_GRAY), panel.x() + 12, panel.y() + 56, -1);
+		}
+		RenderSystem.enableDepthTest();
+		context.pop();
+	}
+
+	private void renderInsertRow(EmiDrawContext context, DrawContext raw, Bounds row, EmiIngredient thumbnail, String title, int mouseX, int mouseY, float delta) {
+		context.fill(row.x(), row.y(), row.width(), row.height(), row.contains(mouseX, mouseY) ? 0xFF31465E : 0xCC1F2A36);
+		if (thumbnail != null && !thumbnail.isEmpty()) {
+			thumbnail.render(raw, row.x() + 4, row.y() + 4, delta, 0);
+		}
+		context.drawTextWithShadow(trimLibraryText(title, row.width() - 28, Formatting.WHITE), row.x() + 24, row.y() + 8, -1);
+	}
+
+	private boolean handleInsertOverlayClick(double mouseX, double mouseY, int button) {
+		if (!insertOverlayOpen || button != 0) {
+			return false;
+		}
+		Bounds panel = getInsertOverlayBounds();
+		if (!panel.contains((int) mouseX, (int) mouseY)) {
+			return false;
+		}
+		int y = panel.y() + 38;
+		for (int i = 0; i < BoM.TREE_SLOT_COUNT && y < panel.y() + panel.height() - 24; i++) {
+			SavedRecipeTree saved = BoM.getSavedTree(i);
+			if (saved.isEmpty()) {
+				continue;
+			}
+			Bounds row = new Bounds(panel.x() + 10, y, panel.width() - 20, 24);
+			if (row.contains((int) mouseX, (int) mouseY)) {
+				insertSavedTreeIntoPureRef(i);
+				insertOverlayOpen = false;
+				return true;
+			}
+			y += 28;
+		}
+		return true;
+	}
+
 	private boolean handleLibraryClick(double mouseX, double mouseY, int button) {
 		if (!libraryOpen || button != 0) {
 			return false;
@@ -782,6 +1186,10 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public void render(DrawContext raw, int mouseX, int mouseY, float delta) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			renderPureRefBoard(raw, mouseX, mouseY, delta);
+			return;
+		}
 		EmiDrawContext context = EmiDrawContext.wrap(raw);
 		this.renderBackgroundTexture(context.raw());
 		lastMouseX = mouseX;
@@ -849,9 +1257,13 @@ public class BoMScreen extends Screen {
 		if (loadWarning) {
 			context.drawTextWithShadow(EmiPort.literal("Loaded recipe tree with missing data", Formatting.YELLOW), 8, 34, -1);
 		}
+		if (focusedPureRefTree != null) {
+			context.drawTextWithShadow(EmiPort.literal("Editing embedded tree  |  Back To Board saves changes to the Board View project", Formatting.DARK_GRAY),
+				8, height - 42, -1);
+		}
 		context.drawTextWithShadow(EmiPort.literal("RMB node: menu  |  LMB drag: move node  |  Ctrl+LMB drag: move branch  |  MMB drag background: pan", Formatting.DARK_GRAY),
 			8, height - 28, -1);
-		if (libraryOpen) {
+		if (libraryOpen && viewMode == ViewMode.TREE) {
 			libraryScroll += (libraryScrollTarget - libraryScroll) * 0.35f;
 			if (Math.abs(libraryScrollTarget - libraryScroll) < 0.01f) {
 				libraryScroll = libraryScrollTarget;
@@ -918,6 +1330,36 @@ public class BoMScreen extends Screen {
 		RECIPES,
 		FOLD,
 		UNFOLD
+	}
+
+	private enum ViewMode {
+		TREE,
+		PURE_REF
+	}
+
+	private enum PureRefTool {
+		SELECT("Select"),
+		NOTE("Note"),
+		LINE("Line"),
+		ARROW("Arrow"),
+		BOX("Box");
+
+		private final String label;
+
+		PureRefTool(String label) {
+			this.label = label;
+		}
+	}
+
+	private enum ShapeHandle {
+		NONE,
+		MOVE,
+		START,
+		END,
+		TOP_LEFT,
+		TOP_RIGHT,
+		BOTTOM_LEFT,
+		BOTTOM_RIGHT
 	}
 
 	public int getNodeHeight(MaterialNode node) {
@@ -1035,6 +1477,107 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			if (projectRenameField != null && projectRenameField.isVisible() && projectRenameField.isFocused()
+				&& projectRenameField.keyPressed(keyCode, scanCode, modifiers)) {
+				return true;
+			}
+			if (editingNote != null && handleInlineNoteKeyPressed(keyCode, scanCode, modifiers)) {
+				return true;
+			}
+			if (editingNote != null) {
+				if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+					insertInlineNoteLineBreak();
+					return true;
+				} else if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+					closeNoteEditor();
+					selectedPureRefObject = null;
+					pureRefTool = PureRefTool.SELECT;
+					return true;
+				}
+			}
+			if (projectRenameField != null && projectRenameField.isVisible()) {
+				if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+					commitProjectRename();
+					return true;
+				} else if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+					renamingProjectSlot = -1;
+					updateProjectRenameField();
+					return true;
+				}
+			}
+			if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+				if (insertOverlayOpen) {
+					insertOverlayOpen = false;
+					return true;
+				}
+				if (projectLibraryOpen) {
+					projectLibraryOpen = false;
+					renamingProjectSlot = -1;
+					updateProjectRenameField();
+					return true;
+				}
+				if (editingNote != null) {
+					closeNoteEditor();
+					return true;
+				}
+				if (pendingTreeInsert != null) {
+					pendingTreeInsert = null;
+					return true;
+				}
+				this.close();
+				return true;
+			}
+			if (isPureRefTextInputFocused()) {
+				return true;
+			}
+			if ((keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER)
+				&& selectedPureRefObject instanceof PureRefProject.NoteObject note) {
+				openNoteEditor(note);
+				return true;
+			}
+			if (keyCode == GLFW.GLFW_KEY_DELETE && selectedPureRefObject != null) {
+				if (selectedPureRefObject instanceof PureRefProject.NoteObject note) {
+					if (editingNote != null) {
+						commitNoteEditor();
+					}
+					pendingNoteDelete = note;
+				} else {
+					project().objects.remove(selectedPureRefObject);
+					selectedPureRefObject = null;
+				}
+				return true;
+			}
+			if (EmiInput.isControlDown() && keyCode == GLFW.GLFW_KEY_D && selectedPureRefObject != null) {
+				PureRefProject.Object copy = selectedPureRefObject.copy();
+				copy.x += 18;
+				copy.y += 18;
+				project().objects.add(copy);
+				selectedPureRefObject = copy;
+				return true;
+			}
+			if (keyCode == GLFW.GLFW_KEY_1) {
+				pureRefTool = PureRefTool.SELECT;
+				return true;
+			} else if (keyCode == GLFW.GLFW_KEY_2) {
+				pureRefTool = PureRefTool.NOTE;
+				return true;
+			} else if (keyCode == GLFW.GLFW_KEY_3) {
+				pureRefTool = PureRefTool.LINE;
+				return true;
+			} else if (keyCode == GLFW.GLFW_KEY_4) {
+				pureRefTool = PureRefTool.ARROW;
+				return true;
+			} else if (keyCode == GLFW.GLFW_KEY_5) {
+				pureRefTool = PureRefTool.BOX;
+				return true;
+			}
+			return super.keyPressed(keyCode, scanCode, modifiers);
+		}
+		if (focusedPureRefTree != null && keyCode == GLFW.GLFW_KEY_ESCAPE) {
+			exitPureRefTreeFocus(true);
+			return true;
+		}
 		if (renameField != null && renameField.isVisible()) {
 			if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
 				commitRename();
@@ -1092,6 +1635,223 @@ public class BoMScreen extends Screen {
 			init();
 		}
 		return super.keyPressed(keyCode, scanCode, modifiers);
+	}
+
+	@Override
+	public boolean charTyped(char chr, int modifiers) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			if (projectRenameField != null && projectRenameField.isVisible() && projectRenameField.isFocused()
+				&& projectRenameField.charTyped(chr, modifiers)) {
+				return true;
+			}
+			if (editingNote != null && handleInlineNoteCharTyped(chr)) {
+				return true;
+			}
+		}
+		if (renameField != null && renameField.isVisible() && renameField.isFocused() && renameField.charTyped(chr, modifiers)) {
+			return true;
+		}
+		return super.charTyped(chr, modifiers);
+	}
+
+	private boolean isPureRefTextInputFocused() {
+		return projectRenameField != null && projectRenameField.isVisible() && projectRenameField.isFocused()
+			|| editingNote != null;
+	}
+
+	private boolean handleInlineNoteCharTyped(char chr) {
+		if (editingNote == null || Character.isISOControl(chr)) {
+			return false;
+		}
+		String line = editingNoteLines.get(editingNoteCursorLine);
+		editingNoteLines.set(editingNoteCursorLine,
+			line.substring(0, editingNoteCursorColumn) + chr + line.substring(editingNoteCursorColumn));
+		editingNoteCursorColumn++;
+		normalizeInlineNoteWrapping();
+		return true;
+	}
+
+	private boolean handleInlineNoteKeyPressed(int keyCode, int scanCode, int modifiers) {
+		if (editingNote == null) {
+			return false;
+		}
+		boolean ctrl = Screen.hasControlDown();
+		switch (keyCode) {
+			case GLFW.GLFW_KEY_BACKSPACE -> {
+				if (ctrl) {
+					deleteInlineNoteToPreviousWord();
+				} else if (editingNoteCursorColumn > 0) {
+					String line = editingNoteLines.get(editingNoteCursorLine);
+					editingNoteLines.set(editingNoteCursorLine,
+						line.substring(0, editingNoteCursorColumn - 1) + line.substring(editingNoteCursorColumn));
+					editingNoteCursorColumn--;
+				} else if (editingNoteCursorLine > 0) {
+					String current = editingNoteLines.remove(editingNoteCursorLine);
+					editingNoteCursorLine--;
+					String previous = editingNoteLines.get(editingNoteCursorLine);
+					editingNoteCursorColumn = previous.length();
+					editingNoteLines.set(editingNoteCursorLine, previous + current);
+				}
+				normalizeInlineNoteWrapping();
+				return true;
+			}
+			case GLFW.GLFW_KEY_DELETE -> {
+				if (ctrl) {
+					deleteInlineNoteToNextWord();
+				} else {
+					String line = editingNoteLines.get(editingNoteCursorLine);
+					if (editingNoteCursorColumn < line.length()) {
+						editingNoteLines.set(editingNoteCursorLine,
+							line.substring(0, editingNoteCursorColumn) + line.substring(editingNoteCursorColumn + 1));
+					} else if (editingNoteCursorLine < editingNoteLines.size() - 1) {
+						String next = editingNoteLines.remove(editingNoteCursorLine + 1);
+						editingNoteLines.set(editingNoteCursorLine, line + next);
+					}
+				}
+				normalizeInlineNoteWrapping();
+				return true;
+			}
+			case GLFW.GLFW_KEY_LEFT -> {
+				if (ctrl) {
+					moveInlineNoteCursorToPreviousWord();
+				} else if (editingNoteCursorColumn > 0) {
+					editingNoteCursorColumn--;
+				} else if (editingNoteCursorLine > 0) {
+					editingNoteCursorLine--;
+					editingNoteCursorColumn = editingNoteLines.get(editingNoteCursorLine).length();
+				}
+				return true;
+			}
+			case GLFW.GLFW_KEY_RIGHT -> {
+				if (ctrl) {
+					moveInlineNoteCursorToNextWord();
+				} else {
+					String line = editingNoteLines.get(editingNoteCursorLine);
+					if (editingNoteCursorColumn < line.length()) {
+						editingNoteCursorColumn++;
+					} else if (editingNoteCursorLine < editingNoteLines.size() - 1) {
+						editingNoteCursorLine++;
+						editingNoteCursorColumn = 0;
+					}
+				}
+				return true;
+			}
+			case GLFW.GLFW_KEY_UP -> {
+				if (editingNoteCursorLine > 0) {
+					editingNoteCursorLine--;
+					editingNoteCursorColumn = Math.min(editingNoteCursorColumn, editingNoteLines.get(editingNoteCursorLine).length());
+				}
+				return true;
+			}
+			case GLFW.GLFW_KEY_DOWN -> {
+				if (editingNoteCursorLine < editingNoteLines.size() - 1) {
+					editingNoteCursorLine++;
+					editingNoteCursorColumn = Math.min(editingNoteCursorColumn, editingNoteLines.get(editingNoteCursorLine).length());
+				}
+				return true;
+			}
+			case GLFW.GLFW_KEY_HOME -> {
+				editingNoteCursorColumn = 0;
+				return true;
+			}
+			case GLFW.GLFW_KEY_END -> {
+				editingNoteCursorColumn = editingNoteLines.get(editingNoteCursorLine).length();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private void moveInlineNoteCursorToPreviousWord() {
+		if (editingNoteCursorColumn == 0) {
+			if (editingNoteCursorLine > 0) {
+				editingNoteCursorLine--;
+				editingNoteCursorColumn = editingNoteLines.get(editingNoteCursorLine).length();
+			}
+			return;
+		}
+		String line = editingNoteLines.get(editingNoteCursorLine);
+		editingNoteCursorColumn = findPreviousWordBoundary(line, editingNoteCursorColumn);
+	}
+
+	private void moveInlineNoteCursorToNextWord() {
+		String line = editingNoteLines.get(editingNoteCursorLine);
+		if (editingNoteCursorColumn >= line.length()) {
+			if (editingNoteCursorLine < editingNoteLines.size() - 1) {
+				editingNoteCursorLine++;
+				editingNoteCursorColumn = 0;
+			}
+			return;
+		}
+		editingNoteCursorColumn = findNextWordBoundary(line, editingNoteCursorColumn);
+	}
+
+	private void deleteInlineNoteToPreviousWord() {
+		if (editingNoteCursorColumn > 0) {
+			String line = editingNoteLines.get(editingNoteCursorLine);
+			int boundary = findPreviousWordBoundary(line, editingNoteCursorColumn);
+			editingNoteLines.set(editingNoteCursorLine,
+				line.substring(0, boundary) + line.substring(editingNoteCursorColumn));
+			editingNoteCursorColumn = boundary;
+		} else if (editingNoteCursorLine > 0) {
+			String current = editingNoteLines.remove(editingNoteCursorLine);
+			editingNoteCursorLine--;
+			String previous = editingNoteLines.get(editingNoteCursorLine);
+			editingNoteCursorColumn = previous.length();
+			editingNoteLines.set(editingNoteCursorLine, previous + current);
+		}
+	}
+
+	private void deleteInlineNoteToNextWord() {
+		String line = editingNoteLines.get(editingNoteCursorLine);
+		if (editingNoteCursorColumn < line.length()) {
+			int boundary = findNextWordBoundary(line, editingNoteCursorColumn);
+			editingNoteLines.set(editingNoteCursorLine,
+				line.substring(0, editingNoteCursorColumn) + line.substring(boundary));
+		} else if (editingNoteCursorLine < editingNoteLines.size() - 1) {
+			String next = editingNoteLines.remove(editingNoteCursorLine + 1);
+			editingNoteLines.set(editingNoteCursorLine, line + next);
+		}
+	}
+
+	private int findPreviousWordBoundary(String line, int column) {
+		int index = Math.max(0, Math.min(column, line.length()));
+		while (index > 0 && !isWordChar(line.charAt(index - 1))) {
+			index--;
+		}
+		while (index > 0 && isWordChar(line.charAt(index - 1))) {
+			index--;
+		}
+		return index;
+	}
+
+	private int findNextWordBoundary(String line, int column) {
+		int index = Math.max(0, Math.min(column, line.length()));
+		while (index < line.length() && !isWordChar(line.charAt(index))) {
+			index++;
+		}
+		while (index < line.length() && isWordChar(line.charAt(index))) {
+			index++;
+		}
+		return index;
+	}
+
+	private boolean isWordChar(char c) {
+		return Character.isLetterOrDigit(c) || c == '_';
+	}
+
+	private void insertInlineNoteLineBreak() {
+		if (editingNote == null) {
+			return;
+		}
+		String line = editingNoteLines.get(editingNoteCursorLine);
+		String before = line.substring(0, editingNoteCursorColumn);
+		String after = line.substring(editingNoteCursorColumn);
+		editingNoteLines.set(editingNoteCursorLine, before);
+		editingNoteLines.add(editingNoteCursorLine + 1, after);
+		editingNoteCursorLine++;
+		editingNoteCursorColumn = 0;
+		normalizeInlineNoteWrapping();
 	}
 
 	private boolean getAutoResolutions(Hover hover, BiConsumer<EmiIngredient, EmiRecipe> consumer) {
@@ -1175,6 +1935,125 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseClicked(double mouseX, double mouseY, int button) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			if (button == 0 && pendingNoteDelete != null) {
+				if (getConfirmNoteDeleteBounds().contains((int) mouseX, (int) mouseY)) {
+					project().objects.remove(pendingNoteDelete);
+					if (selectedPureRefObject == pendingNoteDelete) {
+						selectedPureRefObject = null;
+					}
+					if (editingNote == pendingNoteDelete) {
+						closeNoteEditor();
+					}
+					pendingNoteDelete = null;
+					pureRefTool = PureRefTool.SELECT;
+					return true;
+				}
+				if (getCancelNoteDeleteBounds().contains((int) mouseX, (int) mouseY)) {
+					pendingNoteDelete = null;
+					return true;
+				}
+				pendingNoteDelete = null;
+			}
+			if (handleProjectOverlayClick(mouseX, mouseY, button)) {
+				return true;
+			}
+			if (handleInsertOverlayClick(mouseX, mouseY, button)) {
+				return true;
+			}
+			if (editingNote != null && button == 0) {
+				int cx = getPureRefCanvasX(mouseX);
+				int cy = getPureRefCanvasY(mouseY);
+				if (getPureRefNoteBounds(editingNote).contains(cx, cy)) {
+					setInlineNoteCursor(editingNote, cx, cy);
+				} else {
+					commitNoteEditor();
+					selectedPureRefObject = null;
+					pureRefTool = PureRefTool.SELECT;
+				}
+				return true;
+			}
+			if (super.mouseClicked(mouseX, mouseY, button)) {
+				return true;
+			}
+			for (int i = 0, x = 8; i < PureRefTool.values().length; i++, x += 78) {
+				Bounds bounds = new Bounds(x, 36, 74, 18);
+				if (bounds.contains((int) mouseX, (int) mouseY) && button == 0) {
+					pureRefTool = PureRefTool.values()[i];
+					return true;
+				}
+			}
+			int cx = getPureRefCanvasX(mouseX);
+			int cy = getPureRefCanvasY(mouseY);
+			if (button == 0 && pendingTreeInsert != null) {
+				pendingTreeInsert.x = cx - pendingTreeInsert.width / 2;
+				pendingTreeInsert.y = cy - pendingTreeInsert.height / 2;
+				project().objects.add(pendingTreeInsert);
+				selectedPureRefObject = pendingTreeInsert;
+				pendingTreeInsert = null;
+				return true;
+			}
+			if (button == 2) {
+				pureRefPanning = true;
+				pureRefDragLastX = cx;
+				pureRefDragLastY = cy;
+				return true;
+			}
+			if (button == 1) {
+				PureRefProject.Object object = getPureRefObjectAt(cx, cy);
+				if (object instanceof PureRefProject.NoteObject note) {
+					selectedPureRefObject = note;
+					openNoteEditor(note);
+					return true;
+				}
+			}
+			if (button == 0) {
+				pureRefObjectMoved = false;
+				if (pureRefTool == PureRefTool.NOTE) {
+					PureRefProject.NoteObject note = new PureRefProject.NoteObject(PureRefProject.nextObjectId(), cx, cy, 220, 10, "", "New note", 0);
+					project().objects.add(note);
+					selectedPureRefObject = note;
+					openNoteEditor(note);
+					return true;
+				}
+				if (pureRefTool == PureRefTool.LINE || pureRefTool == PureRefTool.ARROW || pureRefTool == PureRefTool.BOX) {
+					beginShapeDraft(cx, cy);
+					pureRefDragLastX = cx;
+					pureRefDragLastY = cy;
+					return true;
+				}
+				PureRefProject.Object object = getPureRefObjectAt(cx, cy);
+				selectedPureRefObject = object;
+				pendingNoteDelete = null;
+				editingShape = null;
+				activeShapeHandle = ShapeHandle.NONE;
+				if (object instanceof PureRefProject.NoteObject note && isNoteResizeHandle(note, cx, cy)) {
+					pureRefResizingNote = true;
+				} else if (object instanceof PureRefProject.TreeObject tree && isTreeResizeHandle(tree, cx, cy)) {
+					pureRefResizingTree = true;
+				} else if (object instanceof PureRefProject.ShapeObject shape) {
+					editingShape = shape;
+					activeShapeHandle = getShapeHandle(shape, cx, cy);
+					pureRefDraggingObject = activeShapeHandle != ShapeHandle.NONE;
+				} else if (object != null) {
+					pureRefDraggingObject = true;
+				}
+				pureRefDragLastX = cx;
+				pureRefDragLastY = cy;
+				long now = System.currentTimeMillis();
+				if (object != null && object.id.equals(lastPureRefClickId) && now - lastPureRefClickTime < 250) {
+					if (object instanceof PureRefProject.TreeObject treeObject) {
+						enterPureRefTreeFocus(treeObject);
+					} else if (object instanceof PureRefProject.NoteObject note) {
+						openNoteEditor(note);
+					}
+				}
+				lastPureRefClickId = object == null ? null : object.id;
+				lastPureRefClickTime = now;
+				return true;
+			}
+			return super.mouseClicked(mouseX, mouseY, button);
+		}
 		if (handleLibraryClick(mouseX, mouseY, button)) {
 			return true;
 		}
@@ -1232,6 +2111,31 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseReleased(double mouseX, double mouseY, int button) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			if (button == 0) {
+				if (!pureRefObjectMoved && selectedPureRefObject instanceof PureRefProject.NoteObject note && editingNote == null) {
+					openNoteEditor(note);
+				}
+				pureRefDraggingObject = false;
+				pureRefResizingNote = false;
+				pureRefResizingTree = false;
+				editingShape = null;
+				activeShapeHandle = ShapeHandle.NONE;
+				if (pureRefCreatingShape) {
+					pureRefCreatingShape = false;
+					if (activeShapeDraft != null && activeShapeDraft.x == activeShapeDraft.x2 && activeShapeDraft.y == activeShapeDraft.y2) {
+						project().objects.remove(activeShapeDraft);
+					}
+					activeShapeDraft = null;
+				}
+				return true;
+			}
+			if (button == 2 && pureRefPanning) {
+				pureRefPanning = false;
+				return true;
+			}
+			return super.mouseReleased(mouseX, mouseY, button);
+		}
 		if (button == 0 && draggedNode != null) {
 			if (!draggedNodeMoved) {
 				long now = System.currentTimeMillis();
@@ -1272,6 +2176,15 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseScrolled(double mouseX, double mouseY, double amount) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			if (projectLibraryOpen && getProjectPanelBounds().contains((int) mouseX, (int) mouseY)) {
+				projectScrollTarget = MathHelper.clamp(projectScrollTarget - (float) amount * 0.65f, 0, getProjectMaxScroll());
+				return true;
+			}
+			zoom += (int) amount;
+			project().zoom = zoom;
+			return true;
+		}
 		if (libraryOpen && getLibraryPanelBounds().contains((int) mouseX, (int) mouseY)) {
 			libraryScrollTarget = MathHelper.clamp(libraryScrollTarget - (float) amount * 0.65f, 0, getLibraryMaxScroll());
 			return true;
@@ -1308,6 +2221,84 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
+		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			int cx = getPureRefCanvasX(mouseX);
+			int cy = getPureRefCanvasY(mouseY);
+			if (button == 0 && pureRefCreatingShape && activeShapeDraft != null) {
+				activeShapeDraft.x2 = cx;
+				activeShapeDraft.y2 = cy;
+				return true;
+			}
+			if (button == 0 && pureRefDraggingObject && selectedPureRefObject != null) {
+				int dx = cx - pureRefDragLastX;
+				int dy = cy - pureRefDragLastY;
+				pureRefDragLastX = cx;
+				pureRefDragLastY = cy;
+				if (dx != 0 || dy != 0) {
+					pureRefObjectMoved = true;
+					if (editingNote != null) {
+						commitNoteEditor();
+					}
+				}
+				if (selectedPureRefObject instanceof PureRefProject.ShapeObject shape) {
+					switch (activeShapeHandle) {
+						case START -> {
+							shape.x += dx;
+							shape.y += dy;
+						}
+						case END -> {
+							shape.x2 += dx;
+							shape.y2 += dy;
+						}
+						case TOP_LEFT -> {
+							shape.x += dx;
+							shape.y += dy;
+						}
+						case TOP_RIGHT -> {
+							shape.x2 += dx;
+							shape.y += dy;
+						}
+						case BOTTOM_LEFT -> {
+							shape.x += dx;
+							shape.y2 += dy;
+						}
+						case BOTTOM_RIGHT -> {
+							shape.x2 += dx;
+							shape.y2 += dy;
+						}
+						case MOVE, NONE -> {
+							shape.x += dx;
+							shape.y += dy;
+							shape.x2 += dx;
+							shape.y2 += dy;
+						}
+					}
+				} else {
+					selectedPureRefObject.x += dx;
+					selectedPureRefObject.y += dy;
+				}
+				return true;
+			}
+			if (button == 0 && pureRefResizingTree && selectedPureRefObject instanceof PureRefProject.TreeObject tree) {
+				tree.width = Math.max(220, cx - tree.x);
+				tree.height = Math.max(140, cy - tree.y);
+				return true;
+			}
+			if (button == 0 && pureRefResizingNote && selectedPureRefObject instanceof PureRefProject.NoteObject note) {
+				note.width = Math.max(120, cx - note.x);
+				note.height = Math.max(70, cy - note.y);
+				return true;
+			}
+			if (button == 2 && pureRefPanning) {
+				float scale = getScale();
+				offX += deltaX / scale;
+				offY += deltaY / scale;
+				project().offX = offX;
+				project().offY = offY;
+				return true;
+			}
+			return super.mouseDragged(mouseX, mouseY, button, deltaX, deltaY);
+		}
 		if (button == 0 && draggedNode != null) {
 			float scale = getScale();
 			int mx = (int) ((mouseX - width / 2) / scale - offX);
@@ -1354,6 +2345,14 @@ public class BoMScreen extends Screen {
 
 	@Override
 	public void close() {
+		if (focusedPureRefTree != null) {
+			exitPureRefTreeFocus(true);
+		}
+		if (viewMode == ViewMode.PURE_REF) {
+			project().offX = offX;
+			project().offY = offY;
+			project().zoom = zoom;
+		}
 		MinecraftClient.getInstance().setScreen(old);
 	}
 
@@ -1379,6 +2378,691 @@ public class BoMScreen extends Screen {
 	public void applyLoadedTree(boolean missingData) {
 		loadWarning = missingData;
 		init(client, width, height);
+	}
+
+	private void updateNoteEditorFields() {
+		// Note editing is handled directly on the canvas.
+	}
+
+	private void normalizeInlineNoteWrapping() {
+		if (editingNote == null) {
+			return;
+		}
+		int cursorIndex = getInlineNoteCursorIndex();
+		editingNoteLines = wrapInlineNoteLines(editingNoteLines);
+		restoreInlineNoteCursorFromIndex(cursorIndex);
+	}
+
+	private int getInlineNoteCursorIndex() {
+		int index = 0;
+		for (int i = 0; i < editingNoteCursorLine && i < editingNoteLines.size(); i++) {
+			index += editingNoteLines.get(i).length() + 1;
+		}
+		if (!editingNoteLines.isEmpty()) {
+			index += Math.min(editingNoteCursorColumn, editingNoteLines.get(Math.min(editingNoteCursorLine, editingNoteLines.size() - 1)).length());
+		}
+		return index;
+	}
+
+	private void restoreInlineNoteCursorFromIndex(int index) {
+		if (editingNoteLines.isEmpty()) {
+			editingNoteLines.add("");
+		}
+		int remaining = Math.max(0, index);
+		for (int i = 0; i < editingNoteLines.size(); i++) {
+			String line = editingNoteLines.get(i);
+			if (remaining <= line.length()) {
+				editingNoteCursorLine = i;
+				editingNoteCursorColumn = remaining;
+				return;
+			}
+			remaining -= line.length();
+			if (i < editingNoteLines.size() - 1) {
+				if (remaining == 0) {
+					editingNoteCursorLine = i;
+					editingNoteCursorColumn = line.length();
+					return;
+				}
+				remaining--;
+			}
+		}
+		editingNoteCursorLine = editingNoteLines.size() - 1;
+		editingNoteCursorColumn = editingNoteLines.get(editingNoteCursorLine).length();
+	}
+
+	private List<String> wrapInlineNoteLines(List<String> sourceLines) {
+		List<String> wrapped = Lists.newArrayList();
+		for (String source : sourceLines) {
+			if (source.isEmpty()) {
+				wrapped.add("");
+				continue;
+			}
+			String remaining = source;
+			while (!remaining.isEmpty()) {
+				int split = remaining.length();
+				while (split > 0 && textRenderer.getWidth(remaining.substring(0, split)) > PURE_REF_NOTE_WRAP_WIDTH) {
+					split--;
+				}
+				if (split <= 0) {
+					split = 1;
+				}
+				if (split < remaining.length()) {
+					int lastSpace = remaining.lastIndexOf(' ', split - 1);
+					if (lastSpace > 0) {
+						split = lastSpace + 1;
+					}
+				}
+				String line = remaining.substring(0, split);
+				wrapped.add(line);
+				remaining = remaining.substring(split);
+			}
+		}
+		if (wrapped.isEmpty()) {
+			wrapped.add("");
+		}
+		return wrapped;
+	}
+
+	private String getPureRefNoteText(PureRefProject.NoteObject note) {
+		String body = note.body == null ? "" : note.body.trim();
+		if (!body.isEmpty()) {
+			return body;
+		}
+		String title = note.title == null ? "" : note.title.trim();
+		if (!title.isEmpty()) {
+			return title;
+		}
+		return "Note";
+	}
+
+	private List<String> getPureRefNoteLines(PureRefProject.NoteObject note) {
+		String text = getPureRefNoteText(note);
+		List<String> lines = Lists.newArrayList(text.split("\\n", -1));
+		if (lines.isEmpty()) {
+			lines.add("Note");
+		}
+		return lines;
+	}
+
+	private void openNoteEditor(PureRefProject.NoteObject note) {
+		editingNote = note;
+		String text = note.body == null || note.body.isBlank() ? getPureRefNoteText(note) : note.body;
+		editingNoteLines = Lists.newArrayList(text.split("\\n", -1));
+		if (editingNoteLines.isEmpty()) {
+			editingNoteLines.add("");
+		}
+		editingNoteLines = wrapInlineNoteLines(editingNoteLines);
+		editingNoteCursorLine = editingNoteLines.size() - 1;
+		editingNoteCursorColumn = editingNoteLines.get(editingNoteCursorLine).length();
+	}
+
+	private void commitNoteEditor() {
+		if (editingNote != null) {
+			String text = String.join("\n", editingNoteLines);
+			editingNote.title = "";
+			editingNote.body = text;
+			int width = 80;
+			for (String line : editingNoteLines) {
+				width = Math.max(width, textRenderer.getWidth(line.isEmpty() ? " " : line) + 6);
+			}
+			editingNote.width = width;
+			editingNote.height = Math.max(10, editingNoteLines.size() * 10);
+		}
+		editingNote = null;
+		editingNoteLines = Lists.newArrayList();
+		editingNoteCursorLine = 0;
+		editingNoteCursorColumn = 0;
+	}
+
+	private void closeNoteEditor() {
+		editingNote = null;
+		editingNoteLines = Lists.newArrayList();
+		editingNoteCursorLine = 0;
+		editingNoteCursorColumn = 0;
+	}
+
+	private void setInlineNoteCursor(PureRefProject.NoteObject note, int canvasX, int canvasY) {
+		List<String> lines = editingNote == note ? editingNoteLines : getPureRefNoteLines(note);
+		if (lines.isEmpty()) {
+			editingNoteCursorLine = 0;
+			editingNoteCursorColumn = 0;
+			return;
+		}
+		Bounds bounds = getPureRefNoteBounds(note);
+		int line = MathHelper.clamp((canvasY - bounds.y()) / 10, 0, lines.size() - 1);
+		String text = lines.get(line);
+		int targetX = Math.max(0, canvasX - bounds.x());
+		int bestColumn = 0;
+		int bestDistance = Integer.MAX_VALUE;
+		for (int i = 0; i <= text.length(); i++) {
+			int width = textRenderer.getWidth(text.substring(0, i));
+			int distance = Math.abs(width - targetX);
+			if (distance <= bestDistance) {
+				bestDistance = distance;
+				bestColumn = i;
+			}
+		}
+		editingNoteCursorLine = line;
+		editingNoteCursorColumn = bestColumn;
+	}
+
+	private PureRefProject project() {
+		return BoM.pureRefProject;
+	}
+
+	private int getPureRefCanvasX(double mouseX) {
+		float scale = getScale();
+		return (int) ((mouseX - width / 2) / scale - offX);
+	}
+
+	private int getPureRefCanvasY(double mouseY) {
+		float scale = getScale();
+		return (int) ((mouseY - height / 2) / scale - offY);
+	}
+
+	private void renderPureRefBoard(DrawContext raw, int mouseX, int mouseY, float delta) {
+		EmiDrawContext context = EmiDrawContext.wrap(raw);
+		this.renderBackgroundTexture(raw);
+		float scale = getScale();
+		int canvasX = getPureRefCanvasX(mouseX);
+		int canvasY = getPureRefCanvasY(mouseY);
+		MatrixStack view = RenderSystem.getModelViewStack();
+		view.push();
+		view.translate(width / 2, height / 2, 0);
+		view.scale(scale, scale, 1);
+		view.translate(offX, offY, 0);
+		EmiPort.applyModelViewMatrix();
+		renderPureRefGrid(context);
+		for (PureRefProject.Object object : project().objects) {
+			if (object instanceof PureRefProject.ShapeObject shape) {
+				renderPureRefShape(context, shape);
+			}
+		}
+		for (PureRefProject.Object object : project().objects) {
+			if (object instanceof PureRefProject.TreeObject tree) {
+				renderPureRefTreeCard(context, raw, tree, canvasX, canvasY, delta);
+			} else if (object instanceof PureRefProject.NoteObject note) {
+				renderPureRefNote(context, note, canvasX, canvasY);
+			}
+		}
+		if (pendingTreeInsert != null) {
+			int oldX = pendingTreeInsert.x;
+			int oldY = pendingTreeInsert.y;
+			pendingTreeInsert.x = canvasX - pendingTreeInsert.width / 2;
+			pendingTreeInsert.y = canvasY - pendingTreeInsert.height / 2;
+			renderPureRefTreeCard(context, raw, pendingTreeInsert, canvasX, canvasY, delta);
+			pendingTreeInsert.x = oldX;
+			pendingTreeInsert.y = oldY;
+		}
+		if (selectedPureRefObject != null) {
+			renderPureRefSelection(context, selectedPureRefObject);
+		}
+		view.pop();
+		EmiPort.applyModelViewMatrix();
+		renderPureRefToolbar(context, mouseX, mouseY);
+		String hint = pendingTreeInsert != null
+			? "LMB: place tree  |  Esc: cancel placement"
+			: "MMB drag: pan  |  Wheel: zoom  |  Double click tree/note: edit  |  Del: remove  |  Ctrl+D: duplicate";
+		context.drawTextWithShadow(EmiPort.literal(hint, Formatting.DARK_GRAY),
+			8, height - 28, -1);
+		if (pendingNoteDelete != null) {
+			renderNoteDeleteConfirmation(context, mouseX, mouseY);
+		}
+		if (editingNote != null) {
+			updateNoteEditorFields();
+		}
+		if (projectLibraryOpen) {
+			projectScroll += (projectScrollTarget - projectScroll) * 0.35f;
+			if (Math.abs(projectScrollTarget - projectScroll) < 0.01f) {
+				projectScroll = projectScrollTarget;
+			}
+			updateProjectRenameField();
+			renderProjectOverlay(context, mouseX, mouseY);
+		}
+		if (insertOverlayOpen) {
+			renderInsertOverlay(context, raw, mouseX, mouseY, delta);
+		}
+		super.render(raw, mouseX, mouseY, delta);
+	}
+
+	private void renderPureRefGrid(EmiDrawContext context) {
+		int left = -2000;
+		int right = 2000;
+		int top = -2000;
+		int bottom = 2000;
+		for (int x = left; x <= right; x += 32) {
+			int color = x % 128 == 0 ? 0x2A7C8EA6 : 0x143E4A58;
+			context.fill(x, top, 1, bottom - top, color);
+		}
+		for (int y = top; y <= bottom; y += 32) {
+			int color = y % 128 == 0 ? 0x2A7C8EA6 : 0x143E4A58;
+			context.fill(left, y, right - left, 1, color);
+		}
+	}
+
+	private void renderPureRefToolbar(EmiDrawContext context, int mouseX, int mouseY) {
+		int x = 8;
+		int y = 36;
+		for (PureRefTool tool : PureRefTool.values()) {
+			Bounds bounds = new Bounds(x, y, 74, 18);
+			int color = pureRefTool == tool ? 0xFF6B8FB2 : bounds.contains(mouseX, mouseY) ? 0xFF3B556F : 0xFF273241;
+			context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), color);
+			context.drawCenteredText(EmiPort.literal(tool.label, Formatting.WHITE), bounds.x() + bounds.width() / 2, bounds.y() + 5);
+			x += 78;
+		}
+	}
+
+	private Bounds getConfirmNoteDeleteBounds() {
+		return new Bounds(width - 194, 36, 98, 18);
+	}
+
+	private Bounds getCancelNoteDeleteBounds() {
+		return new Bounds(width - 92, 36, 80, 18);
+	}
+
+	private void renderNoteDeleteConfirmation(EmiDrawContext context, int mouseX, int mouseY) {
+		Bounds confirm = getConfirmNoteDeleteBounds();
+		Bounds cancel = getCancelNoteDeleteBounds();
+		context.drawTextWithShadow(EmiPort.literal("Delete note?", Formatting.GOLD), confirm.x() - 86, confirm.y() + 5, -1);
+		renderLibraryAction(context, confirm, "Confirm", true, mouseX, mouseY);
+		renderLibraryAction(context, cancel, "Cancel", true, mouseX, mouseY);
+	}
+
+	private void renderPureRefTreeCard(EmiDrawContext context, DrawContext raw, PureRefProject.TreeObject tree, int mouseX, int mouseY, float delta) {
+		Bounds bounds = getPureRefTreeBounds(tree);
+		boolean hovered = bounds.contains(mouseX, mouseY);
+		context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), hovered ? 0xF1283340 : 0xE01C252E);
+		context.fill(bounds.x(), bounds.y(), bounds.width(), BOARD_TREE_HEADER_HEIGHT, 0xFF24394A);
+		context.fill(bounds.x(), bounds.y(), 3, bounds.height(), 0xFF8AB7D6);
+		String editHint = "Double-click";
+		int hintWidth = textRenderer.getWidth(editHint);
+		context.drawTextWithShadow(EmiPort.literal(editHint, Formatting.DARK_GRAY), bounds.x() + bounds.width() - hintWidth - 8, bounds.y() + 5, -1);
+		context.drawTextWithShadow(trimLibraryText(tree.title, bounds.width() - hintWidth - 28, Formatting.WHITE), bounds.x() + 8, bounds.y() + 5, -1);
+		SavedRecipeTree.TreeBuildResult build = tree.buildTree();
+		if (build != null && build.tree != null && build.tree.goal != null) {
+			renderPureRefTreePreview(context, raw, tree, build.tree, bounds, delta);
+		}
+	}
+
+	private void renderPureRefTreePreview(EmiDrawContext context, DrawContext raw, PureRefProject.TreeObject object, MaterialTree tree, Bounds bounds, float delta) {
+		TreeVolume volume = addNewNodes(tree.goal, tree.batches, 1, 0, ChanceState.DEFAULT, "0", -1, 0);
+		int horizontalOffset = (volume.getMaxRight() + volume.getMinLeft()) / 2;
+		for (Node node : volume.nodes) {
+			node.x -= horizontalOffset;
+			node.layoutX = node.x;
+			node.layoutY = node.y;
+		}
+		applyPreviewNodeOffsets(volume.nodes, tree);
+		int previewX = bounds.x() + 10;
+		int previewY = bounds.y() + BOARD_TREE_HEADER_HEIGHT + 6;
+		int previewWidth = bounds.width() - 20;
+		int totalsHeight = BOARD_TREE_FOOTER_HEIGHT;
+		int previewHeight = Math.max(40, bounds.height() - BOARD_TREE_HEADER_HEIGHT - totalsHeight - 12);
+		int minLeft = Integer.MAX_VALUE;
+		int maxRight = Integer.MIN_VALUE;
+		int minTop = Integer.MAX_VALUE;
+		int maxBottom = Integer.MIN_VALUE;
+		for (Node node : volume.nodes) {
+			minLeft = Math.min(minLeft, node.getLeft());
+			maxRight = Math.max(maxRight, node.getRight());
+			minTop = Math.min(minTop, node.getTop() - (node.resolution != null ? 8 : 0));
+			maxBottom = Math.max(maxBottom, node.getBottom());
+		}
+		if (minLeft == Integer.MAX_VALUE) {
+			minLeft = -8;
+			maxRight = 8;
+			minTop = -8;
+			maxBottom = 8;
+		}
+		int contentWidth = Math.max(32, maxRight - minLeft + 20);
+		int contentHeight = Math.max(24, maxBottom - minTop + 20);
+		float scale = Math.min(previewWidth / (float) contentWidth, previewHeight / (float) contentHeight);
+		scale = Math.min(scale, 1f);
+		float translatedX = previewX + previewWidth / 2f - ((minLeft + maxRight) / 2f) * scale;
+		float translatedY = previewY + previewHeight / 2f - ((minTop + maxBottom) / 2f) * scale;
+		context.push();
+		context.matrices().translate(translatedX, translatedY, 0);
+		context.matrices().scale(scale, scale, 1f);
+		for (Node node : volume.nodes) {
+			node.render(context, Integer.MIN_VALUE, Integer.MIN_VALUE, delta);
+		}
+		context.pop();
+		tree.calculateCost();
+		renderPureRefTreeTotals(context, tree, bounds.x() + 8, bounds.y() + bounds.height() - 18, bounds.width() - 16, delta);
+	}
+
+	private void applyPreviewNodeOffsets(List<Node> previewNodes, MaterialTree tree) {
+		List<Map.Entry<String, MaterialTree.NodeOffset>> offsets = tree.nodeOffsets.entrySet().stream()
+			.sorted(Map.Entry.comparingByKey(Comparator.comparingInt(String::length)))
+			.toList();
+		for (Map.Entry<String, MaterialTree.NodeOffset> entry : offsets) {
+			MaterialTree.NodeOffset offset = entry.getValue();
+			if (offset == null || (offset.x() == 0 && offset.y() == 0)) {
+				continue;
+			}
+			String path = entry.getKey();
+			for (Node node : previewNodes) {
+				if (node.path.equals(path) || node.path.startsWith(path + "/")) {
+					node.x += offset.x();
+					node.y += offset.y();
+				}
+			}
+		}
+	}
+
+	private void renderPureRefTreeTotals(EmiDrawContext context, MaterialTree tree, int x, int y, int width, float delta) {
+		List<FlatMaterialCost> treeCosts = Stream.concat(
+			tree.cost.costs.values().stream(),
+			tree.cost.chanceCosts.values().stream()
+		).sorted((a, b) -> Integer.compare(
+			EmiStackList.getIndex(a.ingredient.getEmiStacks().get(0)),
+			EmiStackList.getIndex(b.ingredient.getEmiStacks().get(0))
+		)).toList();
+		context.drawTextWithShadow(EmiPort.literal("Total", Formatting.GRAY), x, y - 10, -1);
+		int currentX = x;
+		int shown = 0;
+		for (FlatMaterialCost cost : treeCosts) {
+			if (shown >= 5) {
+				break;
+			}
+			Text amountText = EmiRenderHelper.getAmountText(cost.ingredient, cost.getEffectiveAmount());
+			int advance = 16 + COST_HORIZONTAL_SPACING + EmiRenderHelper.getAmountOverflow(amountText);
+			if (currentX + advance > x + width - 8) {
+				break;
+			}
+			cost.ingredient.render(context.raw(), currentX, y, delta, ~(EmiIngredient.RENDER_AMOUNT | EmiIngredient.RENDER_REMAINDER));
+			EmiRenderHelper.renderAmount(context, currentX, y, amountText);
+			currentX += advance;
+			shown++;
+		}
+	}
+
+	private void renderPureRefNote(EmiDrawContext context, PureRefProject.NoteObject note, int mouseX, int mouseY) {
+		Bounds bounds = getPureRefNoteBounds(note);
+		List<String> lines = editingNote == note ? editingNoteLines : getPureRefNoteLines(note);
+		for (int i = 0; i < lines.size(); i++) {
+			context.drawTextWithShadow(EmiPort.literal(lines.get(i)), bounds.x(), bounds.y() + i * 10, 0xFFFFFFFF);
+		}
+		if (editingNote == note && (System.currentTimeMillis() / 500) % 2 == 0) {
+			String line = editingNoteLines.get(editingNoteCursorLine);
+			int caretX = bounds.x() + textRenderer.getWidth(line.substring(0, Math.min(editingNoteCursorColumn, line.length())));
+			int caretY = bounds.y() + editingNoteCursorLine * 10;
+			context.fill(caretX, caretY, 1, 9, 0xFFFFFFFF);
+		}
+	}
+
+	private void renderPureRefShape(EmiDrawContext context, PureRefProject.ShapeObject shape) {
+		int color = shape.color;
+		if (shape.shapeType == PureRefProject.ShapeType.BOX) {
+			drawPureRefRect(context, shape.x, shape.y, shape.x2, shape.y2, color, shape.thickness);
+		} else {
+			drawPureRefLine(context, shape.x, shape.y, shape.x2, shape.y2, color, shape.thickness);
+			if (shape.shapeType == PureRefProject.ShapeType.ARROW) {
+				int dx = shape.x2 - shape.x;
+				int dy = shape.y2 - shape.y;
+				double len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+				int hx1 = shape.x2 - (int) (dx / len * 10 - dy / len * 5);
+				int hy1 = shape.y2 - (int) (dy / len * 10 + dx / len * 5);
+				int hx2 = shape.x2 - (int) (dx / len * 10 + dy / len * 5);
+				int hy2 = shape.y2 - (int) (dy / len * 10 - dx / len * 5);
+				drawPureRefLine(context, shape.x2, shape.y2, hx1, hy1, color, shape.thickness);
+				drawPureRefLine(context, shape.x2, shape.y2, hx2, hy2, color, shape.thickness);
+			}
+		}
+	}
+
+	private void renderPureRefSelection(EmiDrawContext context, PureRefProject.Object object) {
+		Bounds bounds = getPureRefObjectBounds(object);
+		context.fill(bounds.x() - 1, bounds.y() - 1, bounds.width() + 2, 1, 0xFF7BA7D0);
+		context.fill(bounds.x() - 1, bounds.y() + bounds.height(), bounds.width() + 2, 1, 0xFF7BA7D0);
+		context.fill(bounds.x() - 1, bounds.y(), 1, bounds.height(), 0xFF7BA7D0);
+		context.fill(bounds.x() + bounds.width(), bounds.y(), 1, bounds.height(), 0xFF7BA7D0);
+		if (object instanceof PureRefProject.ShapeObject shape) {
+			renderShapeHandles(context, shape);
+		} else if (object instanceof PureRefProject.TreeObject tree) {
+			drawHandle(context, tree.x + tree.width, tree.y + tree.height, pureRefResizingTree);
+		}
+	}
+
+	private void renderShapeHandles(EmiDrawContext context, PureRefProject.ShapeObject shape) {
+		if (shape.shapeType == PureRefProject.ShapeType.BOX) {
+			int left = Math.min(shape.x, shape.x2);
+			int right = Math.max(shape.x, shape.x2);
+			int top = Math.min(shape.y, shape.y2);
+			int bottom = Math.max(shape.y, shape.y2);
+			drawHandle(context, left, top, activeShapeHandle == ShapeHandle.TOP_LEFT);
+			drawHandle(context, right, top, activeShapeHandle == ShapeHandle.TOP_RIGHT);
+			drawHandle(context, left, bottom, activeShapeHandle == ShapeHandle.BOTTOM_LEFT);
+			drawHandle(context, right, bottom, activeShapeHandle == ShapeHandle.BOTTOM_RIGHT);
+		} else {
+			drawHandle(context, shape.x, shape.y, activeShapeHandle == ShapeHandle.START);
+			drawHandle(context, shape.x2, shape.y2, activeShapeHandle == ShapeHandle.END);
+		}
+	}
+
+	private void drawHandle(EmiDrawContext context, int x, int y, boolean active) {
+		context.fill(x - 3, y - 3, 6, 6, active ? 0xFFF0D46A : 0xFF7BA7D0);
+	}
+
+	private Bounds getPureRefTreeBounds(PureRefProject.TreeObject tree) {
+		return new Bounds(tree.x, tree.y, tree.width, tree.height);
+	}
+
+	private Bounds getPureRefNoteBounds(PureRefProject.NoteObject note) {
+		List<String> wrapped = editingNote == note ? editingNoteLines : getPureRefNoteLines(note);
+		int widest = 8;
+		for (String line : wrapped) {
+			widest = Math.max(widest, textRenderer.getWidth(line));
+		}
+		int height = Math.max(10, wrapped.size() * 10);
+		return new Bounds(note.x, note.y, widest, height);
+	}
+
+	private Bounds getPureRefShapeBounds(PureRefProject.ShapeObject shape) {
+		int x = Math.min(shape.x, shape.x2);
+		int y = Math.min(shape.y, shape.y2);
+		int w = Math.abs(shape.x2 - shape.x);
+		int h = Math.abs(shape.y2 - shape.y);
+		return new Bounds(x - 4, y - 4, Math.max(8, w + 8), Math.max(8, h + 8));
+	}
+
+	private Bounds getPureRefObjectBounds(PureRefProject.Object object) {
+		if (object instanceof PureRefProject.TreeObject tree) {
+			return getPureRefTreeBounds(tree);
+		} else if (object instanceof PureRefProject.NoteObject note) {
+			return getPureRefNoteBounds(note);
+		} else if (object instanceof PureRefProject.ShapeObject shape) {
+			return getPureRefShapeBounds(shape);
+		}
+		return new Bounds(object.x, object.y, 16, 16);
+	}
+
+	private PureRefProject.Object getPureRefObjectAt(int x, int y) {
+		for (int i = project().objects.size() - 1; i >= 0; i--) {
+			PureRefProject.Object object = project().objects.get(i);
+			if (!(object instanceof PureRefProject.ShapeObject) && getPureRefObjectBounds(object).contains(x, y)) {
+				return object;
+			}
+		}
+		for (int i = project().objects.size() - 1; i >= 0; i--) {
+			PureRefProject.Object object = project().objects.get(i);
+			if (object instanceof PureRefProject.ShapeObject shape && getShapeHandle(shape, x, y) != ShapeHandle.NONE) {
+				return object;
+			}
+		}
+		for (int i = project().objects.size() - 1; i >= 0; i--) {
+			PureRefProject.Object object = project().objects.get(i);
+			if (object instanceof PureRefProject.ShapeObject && getPureRefObjectBounds(object).contains(x, y)) {
+				return object;
+			}
+		}
+		return null;
+	}
+
+	private boolean isNoteResizeHandle(PureRefProject.NoteObject note, int x, int y) {
+		return false;
+	}
+
+	private boolean isTreeResizeHandle(PureRefProject.TreeObject tree, int x, int y) {
+		return isNearPoint(x, y, tree.x + tree.width, tree.y + tree.height, 6);
+	}
+
+	private ShapeHandle getShapeHandle(PureRefProject.ShapeObject shape, int x, int y) {
+		if (shape.shapeType == PureRefProject.ShapeType.BOX) {
+			int left = Math.min(shape.x, shape.x2);
+			int right = Math.max(shape.x, shape.x2);
+			int top = Math.min(shape.y, shape.y2);
+			int bottom = Math.max(shape.y, shape.y2);
+			if (isNearPoint(x, y, left, top, 6)) {
+				return ShapeHandle.TOP_LEFT;
+			}
+			if (isNearPoint(x, y, right, top, 6)) {
+				return ShapeHandle.TOP_RIGHT;
+			}
+			if (isNearPoint(x, y, left, bottom, 6)) {
+				return ShapeHandle.BOTTOM_LEFT;
+			}
+			if (isNearPoint(x, y, right, bottom, 6)) {
+				return ShapeHandle.BOTTOM_RIGHT;
+			}
+			if (x >= left - 4 && x <= right + 4 && y >= top - 4 && y <= bottom + 4) {
+				return ShapeHandle.MOVE;
+			}
+			return ShapeHandle.NONE;
+		}
+		if (isNearPoint(x, y, shape.x, shape.y, 6)) {
+			return ShapeHandle.START;
+		}
+		if (isNearPoint(x, y, shape.x2, shape.y2, 6)) {
+			return ShapeHandle.END;
+		}
+		if (distanceToSegment(x, y, shape.x, shape.y, shape.x2, shape.y2) <= 4) {
+			return ShapeHandle.MOVE;
+		}
+		return ShapeHandle.NONE;
+	}
+
+	private boolean isNearPoint(int x, int y, int px, int py, int threshold) {
+		return Math.abs(x - px) <= threshold && Math.abs(y - py) <= threshold;
+	}
+
+	private double distanceToSegment(int px, int py, int x1, int y1, int x2, int y2) {
+		double dx = x2 - x1;
+		double dy = y2 - y1;
+		if (dx == 0 && dy == 0) {
+			return Math.sqrt((px - x1) * (double) (px - x1) + (py - y1) * (double) (py - y1));
+		}
+		double t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+		t = Math.max(0, Math.min(1, t));
+		double sx = x1 + t * dx;
+		double sy = y1 + t * dy;
+		double ox = px - sx;
+		double oy = py - sy;
+		return Math.sqrt(ox * ox + oy * oy);
+	}
+
+	private void insertSavedTreeIntoPureRef(int slot) {
+		SavedRecipeTree saved = BoM.getSavedTree(slot);
+		if (saved.isEmpty()) {
+			return;
+		}
+		pendingTreeInsert = new PureRefProject.TreeObject(PureRefProject.nextObjectId(),
+			0, 0, 340, 220,
+			saved.name == null || saved.name.isBlank() ? "Saved Tree" : saved.name,
+			saved.thumbnail, saved.snapshot);
+	}
+
+	private void beginShapeDraft(int x, int y) {
+		PureRefProject.ShapeType shape = switch (pureRefTool) {
+			case LINE -> PureRefProject.ShapeType.LINE;
+			case ARROW -> PureRefProject.ShapeType.ARROW;
+			case BOX -> PureRefProject.ShapeType.BOX;
+			default -> null;
+		};
+		if (shape == null) {
+			return;
+		}
+		activeShapeDraft = new PureRefProject.ShapeObject(PureRefProject.nextObjectId(), x, y, x, y, shape, 0xFF89B8E8, 2);
+		project().objects.add(activeShapeDraft);
+		selectedPureRefObject = activeShapeDraft;
+		pureRefCreatingShape = true;
+	}
+
+	private boolean enterPureRefTreeFocus(PureRefProject.TreeObject treeObject) {
+		if (treeObject == null || treeObject.snapshot == null) {
+			return false;
+		}
+		SavedRecipeTree.TreeBuildResult result = treeObject.buildTree();
+		if (result == null || result.tree == null) {
+			return false;
+		}
+		pureRefBoardOffX = offX;
+		pureRefBoardOffY = offY;
+		pureRefBoardZoom = zoom;
+		previousFocusedTree = BoM.tree;
+		previousFocusedCraftingMode = BoM.craftingMode;
+		BoM.tree = result.tree;
+		BoM.craftingMode = treeObject.snapshot.craftingMode;
+		loadWarning = result.missingData;
+		offX = treeObject.snapshot.offX;
+		offY = treeObject.snapshot.offY;
+		zoom = treeObject.snapshot.zoom;
+		focusedPureRefTree = treeObject;
+		closeContextMenu();
+		libraryOpen = false;
+		projectLibraryOpen = false;
+		insertOverlayOpen = false;
+		recalculateTree();
+		syncTopButtons();
+		return true;
+	}
+
+	private void exitPureRefTreeFocus(boolean saveBack) {
+		if (focusedPureRefTree == null) {
+			return;
+		}
+		if (saveBack) {
+			focusedPureRefTree.snapshot = createSnapshot();
+			focusedPureRefTree.thumbnail = getTreeThumbnail();
+			if (focusedPureRefTree.title == null || focusedPureRefTree.title.isBlank()) {
+				focusedPureRefTree.title = getDefaultTreeName();
+			}
+		}
+		BoM.tree = previousFocusedTree;
+		BoM.craftingMode = previousFocusedCraftingMode;
+		offX = pureRefBoardOffX;
+		offY = pureRefBoardOffY;
+		zoom = pureRefBoardZoom;
+		focusedPureRefTree = null;
+		loadWarning = false;
+		closeContextMenu();
+		syncTopButtons();
+	}
+
+	private static void drawPureRefLine(EmiDrawContext context, int x1, int y1, int x2, int y2, int color, int thickness) {
+		double dx = x2 - x1;
+		double dy = y2 - y1;
+		int steps = Math.max(Math.abs((int) dx), Math.abs((int) dy));
+		if (steps == 0) {
+			context.fill(x1, y1, thickness, thickness, color);
+			return;
+		}
+		for (int i = 0; i <= steps; i++) {
+			int x = x1 + (int) Math.round(dx * i / steps);
+			int y = y1 + (int) Math.round(dy * i / steps);
+			context.fill(x - thickness / 2, y - thickness / 2, thickness, thickness, color);
+		}
+	}
+
+	private static void drawPureRefRect(EmiDrawContext context, int x1, int y1, int x2, int y2, int color, int thickness) {
+		int left = Math.min(x1, x2);
+		int top = Math.min(y1, y2);
+		int width = Math.abs(x2 - x1);
+		int height = Math.abs(y2 - y1);
+		context.fill(left, top, width, thickness, color);
+		context.fill(left, top + height - thickness, width, thickness, color);
+		context.fill(left, top, thickness, height, color);
+		context.fill(left + width - thickness, top, thickness, height, color);
 	}
 
 	private class Cost {

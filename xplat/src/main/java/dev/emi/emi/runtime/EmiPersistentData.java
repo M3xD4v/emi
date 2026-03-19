@@ -21,6 +21,7 @@ public class EmiPersistentData {
 			EmiSidebars.save(json);
 			json.add("recipe_defaults", BoM.saveAdded());
 			json.add("recipe_trees", BoM.saveTrees());
+			json.add("pure_ref_projects", BoM.savePureRefProjects());
 			json.add("hidden_stacks", EmiHidden.save());
 			FileWriter writer = new FileWriter(FILE);
 			GSON.toJson(json, writer);
@@ -45,6 +46,9 @@ public class EmiPersistentData {
 			}
 			if (JsonHelper.hasArray(json, "recipe_trees")) {
 				BoM.loadTrees(JsonHelper.getArray(json, "recipe_trees"));
+			}
+			if (JsonHelper.hasArray(json, "pure_ref_projects")) {
+				BoM.loadPureRefProjects(JsonHelper.getArray(json, "pure_ref_projects"));
 			}
 			if (JsonHelper.hasArray(json, "hidden_stacks")) {
 				EmiHidden.load(JsonHelper.getArray(json, "hidden_stacks"));
