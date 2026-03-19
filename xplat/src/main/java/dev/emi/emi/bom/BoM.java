@@ -1,7 +1,13 @@
 package dev.emi.emi.bom;
 
+import java.io.File;
+import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
 import com.google.common.collect.Maps;
@@ -28,7 +34,14 @@ import net.minecraft.util.JsonHelper;
 public class BoM {
 	public static final int TREE_SLOT_COUNT = 50;
 	public static final int PURE_REF_SLOT_COUNT = 50;
+	private static final long PURE_REF_AUTOSAVE_DELAY_MS = 500L;
 	private static RecipeDefaults defaults = new RecipeDefaults();
+	private static final ScheduledExecutorService PURE_REF_AUTOSAVE_EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
+		Thread thread = new Thread(r, "EMI Pure Ref Autosave");
+		thread.setDaemon(true);
+		return thread;
+	});
+	private static final Object PURE_REF_AUTOSAVE_LOCK = new Object();
 	public static MaterialTree tree;
 	public static Map<EmiIngredient, EmiRecipe> defaultRecipes = Maps.newHashMap();
 	public static Map<EmiIngredient, EmiRecipe> addedRecipes = Maps.newHashMap();
@@ -39,6 +52,8 @@ public class BoM {
 	public static java.util.List<PureRefProject> savedPureRefProjects = IntStream.range(0, PURE_REF_SLOT_COUNT)
 		.mapToObj(PureRefProject::empty).collect(java.util.stream.Collectors.toList());
 	public static PureRefProject pureRefProject = PureRefProject.workingCopy();
+	private static volatile boolean pureRefAutosaveDirty = false;
+	private static volatile ScheduledFuture<?> pureRefAutosaveFuture = null;
 
 	public static void setDefaults(RecipeDefaults defaults) {
 		BoM.defaults = defaults;
@@ -113,6 +128,36 @@ public class BoM {
 			}
 		}
 		return arr;
+	}
+
+	public static void markPureRefDirty() {
+		synchronized (PURE_REF_AUTOSAVE_LOCK) {
+			pureRefAutosaveDirty = true;
+			if (pureRefAutosaveFuture != null) {
+				pureRefAutosaveFuture.cancel(false);
+			}
+			pureRefAutosaveFuture = PURE_REF_AUTOSAVE_EXECUTOR.schedule(BoM::flushPureRefAutosave, PURE_REF_AUTOSAVE_DELAY_MS, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	public static void flushPureRefAutosave() {
+		boolean shouldSave;
+		synchronized (PURE_REF_AUTOSAVE_LOCK) {
+			shouldSave = pureRefAutosaveDirty;
+			pureRefAutosaveDirty = false;
+			if (pureRefAutosaveFuture != null) {
+				pureRefAutosaveFuture.cancel(false);
+				pureRefAutosaveFuture = null;
+			}
+		}
+		if (shouldSave) {
+			MinecraftClient client = MinecraftClient.getInstance();
+			if (client != null) {
+				client.execute(dev.emi.emi.runtime.EmiPersistentData::saveWorldProject);
+			} else {
+				dev.emi.emi.runtime.EmiPersistentData.saveWorldProject();
+			}
+		}
 	}
 
 	public static void loadAdded(JsonObject object) {
@@ -310,6 +355,143 @@ public class BoM {
 		PureRefProject project = savedPureRefProjects.get(slot);
 		pureRefProject = project.copy();
 		return true;
+	}
+
+	public static void setWorldProject(PureRefProject project) {
+		if (project == null) {
+			pureRefProject = PureRefProject.workingCopy();
+			return;
+		}
+		PureRefProject copy = project.copy();
+		PureRefProject stored = new PureRefProject(-1, copy.name, copy.offX, copy.offY, copy.zoom);
+		stored.objects.addAll(copy.objects);
+		if (stored.name == null || stored.name.isBlank() || "Untitled Project".equals(stored.name)) {
+			stored.name = "World Project";
+		}
+		pureRefProject = stored;
+	}
+
+	public static PureRefProject snapshotWorldProject() {
+		PureRefProject copy = pureRefProject.copy();
+		PureRefProject stored = new PureRefProject(-1, copy.name, copy.offX, copy.offY, copy.zoom);
+		stored.objects.addAll(copy.objects);
+		if (stored.name == null || stored.name.isBlank() || "Untitled Project".equals(stored.name)) {
+			stored.name = "World Project";
+		}
+		return stored;
+	}
+
+	public static String getWorldProjectKey() {
+		MinecraftClient client = MinecraftClient.getInstance();
+		if (client == null) {
+			return "global";
+		}
+		try {
+			String serverAddress = getCurrentServerAddress(client);
+			if (serverAddress != null && !serverAddress.isBlank()) {
+				return sanitizeWorldKey("server-" + serverAddress);
+			}
+			if (Boolean.TRUE.equals(invokeBoolean(client, "isInSingleplayer"))) {
+				String saveName = getSingleplayerSaveName(client);
+				if (saveName != null && !saveName.isBlank()) {
+					return sanitizeWorldKey("singleplayer-" + saveName);
+				}
+			}
+			if (client.world != null && client.world.getRegistryKey() != null) {
+				return sanitizeWorldKey("dimension-" + client.world.getRegistryKey().getValue());
+			}
+		} catch (Throwable t) {
+			// Fall through to the generic key below.
+		}
+		return "global";
+	}
+
+	public static File getWorldProjectFile() {
+		return new File(new File(EmiPersistentData.FILE.getParentFile() == null ? new File(".") : EmiPersistentData.FILE.getParentFile(), "emi_world_projects"),
+			getWorldProjectKey() + ".json");
+	}
+
+	private static String getCurrentServerAddress(MinecraftClient client) {
+		Object entry = invoke(client, "getCurrentServerEntry");
+		if (entry == null) {
+			return null;
+		}
+		String address = readString(entry, "address");
+		if (address == null) {
+			address = invokeString(entry, "getAddress");
+		}
+		if (address == null) {
+			address = entry.toString();
+		}
+		return address;
+	}
+
+	private static String getSingleplayerSaveName(MinecraftClient client) {
+		Object server = invoke(client, "getServer");
+		if (server == null) {
+			return null;
+		}
+		Object saveProperties = invoke(server, "getSaveProperties");
+		if (saveProperties != null) {
+			String levelName = invokeString(saveProperties, "getLevelName");
+			if (levelName == null) {
+				levelName = readString(saveProperties, "levelName");
+			}
+			if (levelName != null) {
+				return levelName;
+			}
+		}
+		return readString(server, "saveName");
+	}
+
+	private static Object invoke(Object target, String methodName) {
+		if (target == null) {
+			return null;
+		}
+		try {
+			Method method = target.getClass().getMethod(methodName);
+			method.setAccessible(true);
+			return method.invoke(target);
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	private static String invokeString(Object target, String methodName) {
+		Object result = invoke(target, methodName);
+		return result instanceof String string ? string : result == null ? null : result.toString();
+	}
+
+	private static Boolean invokeBoolean(Object target, String methodName) {
+		Object result = invoke(target, methodName);
+		return result instanceof Boolean bool ? bool : null;
+	}
+
+	private static String readString(Object target, String fieldName) {
+		if (target == null) {
+			return null;
+		}
+		try {
+			java.lang.reflect.Field field = target.getClass().getDeclaredField(fieldName);
+			field.setAccessible(true);
+			Object value = field.get(target);
+			return value == null ? null : value.toString();
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	private static String sanitizeWorldKey(String key) {
+		StringBuilder sanitized = new StringBuilder();
+		for (int i = 0; i < key.length(); i++) {
+			char c = key.charAt(i);
+			if (Character.isLetterOrDigit(c) || c == '-' || c == '_' || c == '.') {
+				sanitized.append(c);
+			} else {
+				sanitized.append('_');
+			}
+		}
+		return sanitized.toString();
 	}
 
 	public static void addResolution(EmiIngredient ingredient, EmiRecipe recipe) {

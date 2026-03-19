@@ -14,6 +14,7 @@ import java.util.stream.Stream;
 import org.lwjgl.glfw.GLFW;
 
 import com.google.common.collect.Lists;
+import com.google.gson.JsonElement;
 import com.mojang.blaze3d.systems.RenderSystem;
 
 import dev.emi.emi.EmiPort;
@@ -27,6 +28,7 @@ import dev.emi.emi.api.recipe.EmiResolutionRecipe;
 import dev.emi.emi.api.render.EmiTooltipComponents;
 import dev.emi.emi.api.stack.EmiIngredient;
 import dev.emi.emi.api.stack.EmiStack;
+import dev.emi.emi.api.stack.serializer.EmiIngredientSerializer;
 import dev.emi.emi.api.widget.Bounds;
 import dev.emi.emi.bom.BoM;
 import dev.emi.emi.bom.ChanceMaterialCost;
@@ -76,6 +78,9 @@ public class BoMScreen extends Screen {
 	private static final int PURE_REF_NOTE_WRAP_WIDTH = 260;
 	private static final int BOARD_TREE_HEADER_HEIGHT = 18;
 	private static final int BOARD_TREE_FOOTER_HEIGHT = 22;
+	private static final int[] BOARD_CONTEXT_COLORS = new int[] {
+		0xFFFFFFFF, 0xFFF0D992, 0xFF89B8E8, 0xFFB8E6A1, 0xFFF2A6A6, 0xFFE0B7FF, 0xFFFFD37A, 0xFF9FD3C7
+	};
 	private static int zoom = 0;
 	private Bounds batches = new Bounds(-24, -50, 48, 26);
 	private Bounds mode = new Bounds(-24, -50, 16, 16);
@@ -125,11 +130,18 @@ public class BoMScreen extends Screen {
 	private int selectedProjectSlot = -1;
 	private int renamingProjectSlot = -1;
 	private TextFieldWidget projectRenameField;
+	private TextFieldWidget checklistTitleField;
+	private TextFieldWidget checklistLabelField;
+	private TextFieldWidget checklistCurrentField;
+	private TextFieldWidget checklistTargetField;
 	private PureRefProject.Object selectedPureRefObject = null;
 	private PureRefProject.NoteObject editingNote = null;
+	private PureRefProject.CheckListObject editingCheckList = null;
 	private List<String> editingNoteLines = Lists.newArrayList();
 	private int editingNoteCursorLine = 0;
 	private int editingNoteCursorColumn = 0;
+	private int editingCheckListRow = -1;
+	private int editingCheckListScroll = 0;
 	private boolean pureRefPanning = false;
 	private boolean pureRefDraggingObject = false;
 	private boolean pureRefResizingNote = false;
@@ -144,6 +156,10 @@ public class BoMScreen extends Screen {
 	private PureRefProject.ShapeObject editingShape = null;
 	private PureRefProject.TreeObject pendingTreeInsert = null;
 	private PureRefProject.NoteObject pendingNoteDelete = null;
+	private PureRefProject.Object boardContextMenuObject = null;
+	private int boardContextMenuX = 0;
+	private int boardContextMenuY = 0;
+	private String lastSelectedBoardTreeId = null;
 	private ShapeHandle activeShapeHandle = ShapeHandle.NONE;
 	private PureRefProject.TreeObject focusedPureRefTree = null;
 	private MaterialTree previousFocusedTree = null;
@@ -227,6 +243,49 @@ public class BoMScreen extends Screen {
 		projectRenameField.setMaxLength(64);
 		projectRenameField.setVisible(false);
 		this.addDrawableChild(projectRenameField);
+		checklistTitleField = new TextFieldWidget(textRenderer, 0, 0, 220, 18, EmiPort.literal(""));
+		checklistTitleField.setMaxLength(64);
+		checklistTitleField.setVisible(false);
+		checklistTitleField.setChangedListener(value -> {
+			if (editingCheckList != null) {
+				editingCheckList.title = value;
+				markBoardDirty();
+			}
+		});
+		this.addDrawableChild(checklistTitleField);
+		checklistLabelField = new TextFieldWidget(textRenderer, 0, 0, 220, 18, EmiPort.literal(""));
+		checklistLabelField.setMaxLength(64);
+		checklistLabelField.setVisible(false);
+		checklistLabelField.setChangedListener(value -> {
+			PureRefProject.CheckListEntry entry = getSelectedCheckListEntry();
+			if (entry != null) {
+				entry.label = value;
+				markBoardDirty();
+			}
+		});
+		this.addDrawableChild(checklistLabelField);
+		checklistCurrentField = new TextFieldWidget(textRenderer, 0, 0, 90, 18, EmiPort.literal(""));
+		checklistCurrentField.setMaxLength(12);
+		checklistCurrentField.setVisible(false);
+		checklistCurrentField.setChangedListener(value -> {
+			PureRefProject.CheckListEntry entry = getSelectedCheckListEntry();
+			if (entry != null) {
+				entry.currentAmount = parseChecklistAmount(value, entry.currentAmount);
+				markBoardDirty();
+			}
+		});
+		this.addDrawableChild(checklistCurrentField);
+		checklistTargetField = new TextFieldWidget(textRenderer, 0, 0, 90, 18, EmiPort.literal(""));
+		checklistTargetField.setMaxLength(12);
+		checklistTargetField.setVisible(false);
+		checklistTargetField.setChangedListener(value -> {
+			PureRefProject.CheckListEntry entry = getSelectedCheckListEntry();
+			if (entry != null) {
+				entry.targetAmount = parseChecklistAmount(value, entry.targetAmount);
+				markBoardDirty();
+			}
+		});
+		this.addDrawableChild(checklistTargetField);
 		if (BoM.tree != null) {
 			if (!Double.isNaN(BoM.tree.snapshotOffX) && !Double.isNaN(BoM.tree.snapshotOffY)) {
 				offX = BoM.tree.snapshotOffX;
@@ -244,6 +303,7 @@ public class BoMScreen extends Screen {
 		syncTopButtons();
 		updateProjectRenameField();
 		updateNoteEditorFields();
+		updateCheckListEditorFields();
 		recalculateTree();
 	}
 
@@ -672,14 +732,20 @@ public class BoMScreen extends Screen {
 		projectRenameField.setY(panel.y() + panel.height() - 26);
 		projectRenameField.setWidth(panel.width() - 24);
 		if (!wasVisible) {
-			projectRenameField.setText(BoM.getSavedPureRefProject(renamingProjectSlot).name);
+			projectRenameField.setText(renamingProjectSlot == 0 ? project().name : BoM.getSavedPureRefProject(renamingProjectSlot).name);
 			projectRenameField.setFocused(true);
 		}
 	}
 
 	private void commitProjectRename() {
 		if (renamingProjectSlot >= 0 && projectRenameField != null) {
-			BoM.renameSavedPureRefProject(renamingProjectSlot, projectRenameField.getText().trim());
+			if (renamingProjectSlot == 0) {
+				project().name = projectRenameField.getText().trim().isBlank() ? "World Project" : projectRenameField.getText().trim();
+				markBoardDirty();
+				BoM.flushPureRefAutosave();
+			} else {
+				BoM.renameSavedPureRefProject(renamingProjectSlot, projectRenameField.getText().trim());
+			}
 		}
 		renamingProjectSlot = -1;
 		updateProjectRenameField();
@@ -694,6 +760,16 @@ public class BoMScreen extends Screen {
 	}
 
 	private void saveProjectToSlot(int slot, boolean override) {
+		if (slot == 0) {
+			project().name = project().name == null || project().name.isBlank() ? "World Project" : project().name;
+			project().offX = offX;
+			project().offY = offY;
+			project().zoom = zoom;
+			markBoardDirty();
+			BoM.flushPureRefAutosave();
+			selectedProjectSlot = slot;
+			return;
+		}
 		PureRefProject existing = BoM.getSavedPureRefProject(slot);
 		if (!override && !existing.isEmpty()) {
 			return;
@@ -728,7 +804,7 @@ public class BoMScreen extends Screen {
 			if (slot >= BoM.PURE_REF_SLOT_COUNT) {
 				break;
 			}
-			PureRefProject project = BoM.getSavedPureRefProject(slot);
+			PureRefProject project = slot == 0 ? project() : BoM.getSavedPureRefProject(slot);
 			Bounds row = getProjectRowBounds(panel, i);
 			row = new Bounds(row.x(), row.y() - Math.round(rowOffset * getProjectRowHeight()), row.width(), row.height());
 			if (row.y() + row.height() < panel.y() + 32 || row.y() > panel.y() + panel.height() - 40) {
@@ -738,16 +814,19 @@ public class BoMScreen extends Screen {
 			boolean selected = selectedProjectSlot == slot;
 			context.fill(row.x(), row.y(), row.width(), row.height(), hovered ? 0xFF3A3128 : selected ? 0xFF302922 : 0xCC241D18);
 			context.fill(row.x(), row.y(), 3, row.height(), selected ? 0xFFD8C27A : 0xFFB58C62);
-			String title = project.isEmpty() ? (slot + 1) + ". Empty Project" : (slot + 1) + ". " + (project.name == null || project.name.isBlank() ? "Project" : project.name);
+			String title = slot == 0
+				? "1. " + (project.name == null || project.name.isBlank() ? "World Project" : project.name)
+				: project.isEmpty() ? (slot + 1) + ". Empty Project" : (slot + 1) + ". " + (project.name == null || project.name.isBlank() ? "Project" : project.name);
 			context.drawTextWithShadow(trimLibraryText(title, row.width() - 160, project.isEmpty() ? Formatting.DARK_GRAY : Formatting.WHITE),
 				row.x() + 10, row.y() + 8, -1);
-			String summary = project.isEmpty() ? "Save current board here" : project.objects.size() + " objects";
+			String summary = slot == 0 ? "World-local autosaved board"
+				: project.isEmpty() ? "Save current board here" : project.objects.size() + " objects";
 			context.drawTextWithShadow(trimLibraryText(summary, row.width() - 160, Formatting.DARK_GRAY), row.x() + 10, row.y() + 22, -1);
 			LibraryRowButtons buttons = getProjectRowButtons(row);
 			renderLibraryAction(context, buttons.save, "Save", true, mouseX, mouseY);
-			renderLibraryAction(context, buttons.rename, "Rename", !project.isEmpty(), mouseX, mouseY);
-			renderLibraryAction(context, buttons.delete, "Delete", !project.isEmpty(), mouseX, mouseY);
-			renderLibraryAction(context, buttons.override, "Override", !project.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.rename, "Rename", slot == 0 || !project.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.delete, "Delete", slot != 0 && !project.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.override, "Override", true, mouseX, mouseY);
 		}
 		RenderSystem.enableDepthTest();
 		context.pop();
@@ -771,7 +850,7 @@ public class BoMScreen extends Screen {
 			if (slot >= BoM.PURE_REF_SLOT_COUNT) {
 				break;
 			}
-			PureRefProject project = BoM.getSavedPureRefProject(slot);
+			PureRefProject project = slot == 0 ? project() : BoM.getSavedPureRefProject(slot);
 			Bounds row = getProjectRowBounds(panel, i);
 			row = new Bounds(row.x(), row.y() - Math.round(rowOffset * getProjectRowHeight()), row.width(), row.height());
 			if (!row.contains((int) mouseX, (int) mouseY)) {
@@ -782,28 +861,33 @@ public class BoMScreen extends Screen {
 				saveProjectToSlot(slot, false);
 				return true;
 			}
-			if (buttons.rename.contains((int) mouseX, (int) mouseY) && !project.isEmpty()) {
+			if (buttons.rename.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
 				selectedProjectSlot = slot;
 				renamingProjectSlot = slot;
 				updateProjectRenameField();
 				return true;
 			}
-			if (buttons.delete.contains((int) mouseX, (int) mouseY) && !project.isEmpty()) {
+			if (buttons.delete.contains((int) mouseX, (int) mouseY) && slot != 0 && !project.isEmpty()) {
 				BoM.deleteSavedPureRefProject(slot);
 				selectedProjectSlot = Math.min(slot, BoM.PURE_REF_SLOT_COUNT - 1);
 				return true;
 			}
-			if (buttons.override.contains((int) mouseX, (int) mouseY) && !project.isEmpty()) {
+			if (buttons.override.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
 				saveProjectToSlot(slot, true);
 				return true;
 			}
 			long now = System.currentTimeMillis();
 			selectedProjectSlot = slot;
-			if (!project.isEmpty() && lastLibraryClickSlot == slot && now - lastLibraryClickTime < 250) {
-				if (BoM.loadSavedPureRefProject(slot)) {
+			if ((slot == 0 || !project.isEmpty()) && lastLibraryClickSlot == slot && now - lastLibraryClickTime < 250) {
+				if (slot == 0) {
+					offX = project().offX;
+					offY = project().offY;
+					zoom = project().zoom;
+				} else if (BoM.loadSavedPureRefProject(slot)) {
 					offX = BoM.pureRefProject.offX;
 					offY = BoM.pureRefProject.offY;
 					zoom = BoM.pureRefProject.zoom;
+					markBoardDirty();
 				}
 			}
 			lastLibraryClickSlot = slot;
@@ -1340,6 +1424,7 @@ public class BoMScreen extends Screen {
 	private enum PureRefTool {
 		SELECT("Select"),
 		NOTE("Note"),
+		CHECKLIST("Checklist"),
 		LINE("Line"),
 		ARROW("Arrow"),
 		BOX("Box");
@@ -1482,6 +1567,14 @@ public class BoMScreen extends Screen {
 				&& projectRenameField.keyPressed(keyCode, scanCode, modifiers)) {
 				return true;
 			}
+			if (editingCheckList != null) {
+				if ((checklistTitleField.isFocused() && checklistTitleField.keyPressed(keyCode, scanCode, modifiers))
+					|| (checklistLabelField.isFocused() && checklistLabelField.keyPressed(keyCode, scanCode, modifiers))
+					|| (checklistCurrentField.isFocused() && checklistCurrentField.keyPressed(keyCode, scanCode, modifiers))
+					|| (checklistTargetField.isFocused() && checklistTargetField.keyPressed(keyCode, scanCode, modifiers))) {
+					return true;
+				}
+			}
 			if (editingNote != null && handleInlineNoteKeyPressed(keyCode, scanCode, modifiers)) {
 				return true;
 			}
@@ -1495,6 +1588,12 @@ public class BoMScreen extends Screen {
 					pureRefTool = PureRefTool.SELECT;
 					return true;
 				}
+			}
+			if (editingCheckList != null && keyCode == GLFW.GLFW_KEY_ESCAPE) {
+				closeCheckListEditor();
+				selectedPureRefObject = null;
+				pureRefTool = PureRefTool.SELECT;
+				return true;
 			}
 			if (projectRenameField != null && projectRenameField.isVisible()) {
 				if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
@@ -1545,6 +1644,7 @@ public class BoMScreen extends Screen {
 				} else {
 					project().objects.remove(selectedPureRefObject);
 					selectedPureRefObject = null;
+					markBoardDirty();
 				}
 				return true;
 			}
@@ -1554,6 +1654,7 @@ public class BoMScreen extends Screen {
 				copy.y += 18;
 				project().objects.add(copy);
 				selectedPureRefObject = copy;
+				markBoardDirty();
 				return true;
 			}
 			if (keyCode == GLFW.GLFW_KEY_1) {
@@ -1563,12 +1664,15 @@ public class BoMScreen extends Screen {
 				pureRefTool = PureRefTool.NOTE;
 				return true;
 			} else if (keyCode == GLFW.GLFW_KEY_3) {
-				pureRefTool = PureRefTool.LINE;
+				pureRefTool = PureRefTool.CHECKLIST;
 				return true;
 			} else if (keyCode == GLFW.GLFW_KEY_4) {
-				pureRefTool = PureRefTool.ARROW;
+				pureRefTool = PureRefTool.LINE;
 				return true;
 			} else if (keyCode == GLFW.GLFW_KEY_5) {
+				pureRefTool = PureRefTool.ARROW;
+				return true;
+			} else if (keyCode == GLFW.GLFW_KEY_6) {
 				pureRefTool = PureRefTool.BOX;
 				return true;
 			}
@@ -1644,6 +1748,14 @@ public class BoMScreen extends Screen {
 				&& projectRenameField.charTyped(chr, modifiers)) {
 				return true;
 			}
+			if (editingCheckList != null) {
+				if ((checklistTitleField.isFocused() && checklistTitleField.charTyped(chr, modifiers))
+					|| (checklistLabelField.isFocused() && checklistLabelField.charTyped(chr, modifiers))
+					|| (checklistCurrentField.isFocused() && checklistCurrentField.charTyped(chr, modifiers))
+					|| (checklistTargetField.isFocused() && checklistTargetField.charTyped(chr, modifiers))) {
+					return true;
+				}
+			}
 			if (editingNote != null && handleInlineNoteCharTyped(chr)) {
 				return true;
 			}
@@ -1656,6 +1768,11 @@ public class BoMScreen extends Screen {
 
 	private boolean isPureRefTextInputFocused() {
 		return projectRenameField != null && projectRenameField.isVisible() && projectRenameField.isFocused()
+			|| editingCheckList != null && (
+				checklistTitleField.isFocused()
+				|| checklistLabelField.isFocused()
+				|| checklistCurrentField.isFocused()
+				|| checklistTargetField.isFocused())
 			|| editingNote != null;
 	}
 
@@ -1668,6 +1785,7 @@ public class BoMScreen extends Screen {
 			line.substring(0, editingNoteCursorColumn) + chr + line.substring(editingNoteCursorColumn));
 		editingNoteCursorColumn++;
 		normalizeInlineNoteWrapping();
+		syncEditingNoteToObject();
 		return true;
 	}
 
@@ -1693,6 +1811,7 @@ public class BoMScreen extends Screen {
 					editingNoteLines.set(editingNoteCursorLine, previous + current);
 				}
 				normalizeInlineNoteWrapping();
+				syncEditingNoteToObject();
 				return true;
 			}
 			case GLFW.GLFW_KEY_DELETE -> {
@@ -1709,6 +1828,7 @@ public class BoMScreen extends Screen {
 					}
 				}
 				normalizeInlineNoteWrapping();
+				syncEditingNoteToObject();
 				return true;
 			}
 			case GLFW.GLFW_KEY_LEFT -> {
@@ -1852,6 +1972,7 @@ public class BoMScreen extends Screen {
 		editingNoteCursorLine++;
 		editingNoteCursorColumn = 0;
 		normalizeInlineNoteWrapping();
+		syncEditingNoteToObject();
 	}
 
 	private boolean getAutoResolutions(Hover hover, BiConsumer<EmiIngredient, EmiRecipe> consumer) {
@@ -1936,6 +2057,12 @@ public class BoMScreen extends Screen {
 	@Override
 	public boolean mouseClicked(double mouseX, double mouseY, int button) {
 		if (viewMode == ViewMode.PURE_REF && focusedPureRefTree == null) {
+			if (handleBoardContextMenuClick((int) mouseX, (int) mouseY, button)) {
+				return true;
+			}
+			if (handleCheckListEditorClick((int) mouseX, (int) mouseY, button)) {
+				return true;
+			}
 			if (button == 0 && pendingNoteDelete != null) {
 				if (getConfirmNoteDeleteBounds().contains((int) mouseX, (int) mouseY)) {
 					project().objects.remove(pendingNoteDelete);
@@ -1947,6 +2074,7 @@ public class BoMScreen extends Screen {
 					}
 					pendingNoteDelete = null;
 					pureRefTool = PureRefTool.SELECT;
+					markBoardDirty();
 					return true;
 				}
 				if (getCancelNoteDeleteBounds().contains((int) mouseX, (int) mouseY)) {
@@ -1990,22 +2118,34 @@ public class BoMScreen extends Screen {
 				pendingTreeInsert.y = cy - pendingTreeInsert.height / 2;
 				project().objects.add(pendingTreeInsert);
 				selectedPureRefObject = pendingTreeInsert;
+				lastSelectedBoardTreeId = pendingTreeInsert.id;
 				pendingTreeInsert = null;
+				markBoardDirty();
 				return true;
 			}
 			if (button == 2) {
+				closeBoardContextMenu();
 				pureRefPanning = true;
 				pureRefDragLastX = cx;
 				pureRefDragLastY = cy;
 				return true;
 			}
 			if (button == 1) {
+				if (editingNote != null) {
+					commitNoteEditor();
+				}
 				PureRefProject.Object object = getPureRefObjectAt(cx, cy);
-				if (object instanceof PureRefProject.NoteObject note) {
-					selectedPureRefObject = note;
-					openNoteEditor(note);
+				if (object instanceof PureRefProject.NoteObject || object instanceof PureRefProject.ShapeObject) {
+					selectedPureRefObject = object;
+					openBoardContextMenu(object, (int) mouseX, (int) mouseY);
 					return true;
 				}
+				if (object instanceof PureRefProject.CheckListObject checkList) {
+					selectedPureRefObject = checkList;
+					openCheckListEditor(checkList);
+					return true;
+				}
+				closeBoardContextMenu();
 			}
 			if (button == 0) {
 				pureRefObjectMoved = false;
@@ -2014,6 +2154,16 @@ public class BoMScreen extends Screen {
 					project().objects.add(note);
 					selectedPureRefObject = note;
 					openNoteEditor(note);
+					markBoardDirty();
+					return true;
+				}
+				if (pureRefTool == PureRefTool.CHECKLIST) {
+					PureRefProject.CheckListObject checkList = new PureRefProject.CheckListObject(PureRefProject.nextObjectId(), cx, cy, 260, 160, "Checklist", null, false, Lists.newArrayList());
+					checkList.entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
+					project().objects.add(checkList);
+					selectedPureRefObject = checkList;
+					openCheckListEditor(checkList);
+					markBoardDirty();
 					return true;
 				}
 				if (pureRefTool == PureRefTool.LINE || pureRefTool == PureRefTool.ARROW || pureRefTool == PureRefTool.BOX) {
@@ -2024,9 +2174,13 @@ public class BoMScreen extends Screen {
 				}
 				PureRefProject.Object object = getPureRefObjectAt(cx, cy);
 				selectedPureRefObject = object;
+				closeBoardContextMenu();
 				pendingNoteDelete = null;
 				editingShape = null;
 				activeShapeHandle = ShapeHandle.NONE;
+				if (object instanceof PureRefProject.TreeObject tree) {
+					lastSelectedBoardTreeId = tree.id;
+				}
 				if (object instanceof PureRefProject.NoteObject note && isNoteResizeHandle(note, cx, cy)) {
 					pureRefResizingNote = true;
 				} else if (object instanceof PureRefProject.TreeObject tree && isTreeResizeHandle(tree, cx, cy)) {
@@ -2046,6 +2200,8 @@ public class BoMScreen extends Screen {
 						enterPureRefTreeFocus(treeObject);
 					} else if (object instanceof PureRefProject.NoteObject note) {
 						openNoteEditor(note);
+					} else if (object instanceof PureRefProject.CheckListObject checkList) {
+						openCheckListEditor(checkList);
 					}
 				}
 				lastPureRefClickId = object == null ? null : object.id;
@@ -2115,6 +2271,11 @@ public class BoMScreen extends Screen {
 			if (button == 0) {
 				if (!pureRefObjectMoved && selectedPureRefObject instanceof PureRefProject.NoteObject note && editingNote == null) {
 					openNoteEditor(note);
+				} else if (!pureRefObjectMoved && selectedPureRefObject instanceof PureRefProject.CheckListObject checkList && editingCheckList == null) {
+					openCheckListEditor(checkList);
+				}
+				if (pureRefObjectMoved || pureRefResizingTree || pureRefResizingNote || pureRefCreatingShape) {
+					markBoardDirty();
 				}
 				pureRefDraggingObject = false;
 				pureRefResizingNote = false;
@@ -2132,6 +2293,7 @@ public class BoMScreen extends Screen {
 			}
 			if (button == 2 && pureRefPanning) {
 				pureRefPanning = false;
+				markBoardDirty();
 				return true;
 			}
 			return super.mouseReleased(mouseX, mouseY, button);
@@ -2181,8 +2343,13 @@ public class BoMScreen extends Screen {
 				projectScrollTarget = MathHelper.clamp(projectScrollTarget - (float) amount * 0.65f, 0, getProjectMaxScroll());
 				return true;
 			}
+			if (editingCheckList != null && getCheckListEditorBounds().contains((int) mouseX, (int) mouseY)) {
+				editingCheckListScroll = MathHelper.clamp(editingCheckListScroll - (int) amount, 0, Math.max(0, editingCheckList.entries.size() - 6));
+				return true;
+			}
 			zoom += (int) amount;
 			project().zoom = zoom;
+			markBoardDirty();
 			return true;
 		}
 		if (libraryOpen && getLibraryPanelBounds().contains((int) mouseX, (int) mouseY)) {
@@ -2352,7 +2519,9 @@ public class BoMScreen extends Screen {
 			project().offX = offX;
 			project().offY = offY;
 			project().zoom = zoom;
+			markBoardDirty();
 		}
+		BoM.flushPureRefAutosave();
 		MinecraftClient.getInstance().setScreen(old);
 	}
 
@@ -2382,6 +2551,398 @@ public class BoMScreen extends Screen {
 
 	private void updateNoteEditorFields() {
 		// Note editing is handled directly on the canvas.
+	}
+
+	private void updateCheckListEditorFields() {
+		boolean visible = editingCheckList != null;
+		if (checklistTitleField == null) {
+			return;
+		}
+		checklistTitleField.setVisible(visible);
+		checklistLabelField.setVisible(visible);
+		checklistCurrentField.setVisible(visible);
+		checklistTargetField.setVisible(visible);
+		if (!visible) {
+			checklistTitleField.setFocused(false);
+			checklistLabelField.setFocused(false);
+			checklistCurrentField.setFocused(false);
+			checklistTargetField.setFocused(false);
+			return;
+		}
+		Bounds panel = getCheckListEditorBounds();
+		checklistTitleField.setX(panel.x() + 12);
+		checklistTitleField.setY(panel.y() + 24);
+		checklistTitleField.setWidth(panel.width() - 24);
+		checklistLabelField.setX(panel.x() + 128);
+		checklistLabelField.setY(panel.y() + 154);
+		checklistLabelField.setWidth(panel.width() - 140);
+		checklistCurrentField.setX(panel.x() + 128);
+		checklistCurrentField.setY(panel.y() + 190);
+		checklistCurrentField.setWidth(64);
+		checklistTargetField.setX(panel.x() + 202);
+		checklistTargetField.setY(panel.y() + 190);
+		checklistTargetField.setWidth(64);
+		String title = editingCheckList.title == null ? "" : editingCheckList.title;
+		if (!checklistTitleField.isFocused() && !Objects.equals(checklistTitleField.getText(), title)) {
+			checklistTitleField.setText(title);
+		}
+		PureRefProject.CheckListEntry entry = getSelectedCheckListEntry();
+		String label = entry == null ? "" : entry.label;
+		String current = entry == null ? "" : Long.toString(entry.currentAmount);
+		String target = entry == null ? "" : Long.toString(entry.targetAmount);
+		if (!checklistLabelField.isFocused() && !Objects.equals(checklistLabelField.getText(), label)) {
+			checklistLabelField.setText(label);
+		}
+		if (!checklistCurrentField.isFocused() && !Objects.equals(checklistCurrentField.getText(), current)) {
+			checklistCurrentField.setText(current);
+		}
+		if (!checklistTargetField.isFocused() && !Objects.equals(checklistTargetField.getText(), target)) {
+			checklistTargetField.setText(target);
+		}
+	}
+
+	private Bounds getCheckListEditorBounds() {
+		int panelWidth = Math.min(280, width - 24);
+		int panelHeight = Math.min(254, height - 70);
+		return new Bounds(width - panelWidth - 12, 64, panelWidth, panelHeight);
+	}
+
+	private PureRefProject.CheckListEntry getSelectedCheckListEntry() {
+		if (editingCheckList == null || editingCheckList.entries.isEmpty()) {
+			return null;
+		}
+		if (editingCheckListRow < 0 || editingCheckListRow >= editingCheckList.entries.size()) {
+			editingCheckListRow = MathHelper.clamp(editingCheckListRow, 0, editingCheckList.entries.size() - 1);
+		}
+		return editingCheckList.entries.get(editingCheckListRow);
+	}
+
+	private long parseChecklistAmount(String text, long fallback) {
+		try {
+			return Math.max(0, Long.parseLong(text.trim()));
+		} catch (Exception e) {
+			return fallback;
+		}
+	}
+
+	private void openCheckListEditor(PureRefProject.CheckListObject checkList) {
+		editingCheckList = checkList;
+		if (editingCheckList.entries.isEmpty()) {
+			editingCheckList.entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
+		}
+		editingCheckListRow = MathHelper.clamp(editingCheckListRow, 0, editingCheckList.entries.size() - 1);
+		updateCheckListEditorFields();
+	}
+
+	private void closeCheckListEditor() {
+		editingCheckList = null;
+		editingCheckListRow = -1;
+		editingCheckListScroll = 0;
+		updateCheckListEditorFields();
+	}
+
+	private Bounds getBoardContextMenuBounds() {
+		int width = 160;
+		int height = 52;
+		int x = MathHelper.clamp(boardContextMenuX, 8, this.width - width - 8);
+		int y = MathHelper.clamp(boardContextMenuY, 64, this.height - height - 8);
+		return new Bounds(x, y, width, height);
+	}
+
+	private Bounds getBoardContextColorBounds(Bounds menu, int index) {
+		int size = 18;
+		int startX = menu.x() + 10;
+		return new Bounds(startX + index * (size + 6), menu.y() + 24, size, size);
+	}
+
+	private void openBoardContextMenu(PureRefProject.Object object, int mouseX, int mouseY) {
+		boardContextMenuObject = object;
+		boardContextMenuX = mouseX + 8;
+		boardContextMenuY = mouseY + 6;
+	}
+
+	private void closeBoardContextMenu() {
+		boardContextMenuObject = null;
+	}
+
+	private int getBoardObjectColor(PureRefProject.Object object) {
+		if (object instanceof PureRefProject.NoteObject note) {
+			return note.color;
+		} else if (object instanceof PureRefProject.ShapeObject shape) {
+			return shape.color;
+		}
+		return 0xFFFFFFFF;
+	}
+
+	private void applyBoardContextColor(int color) {
+		if (boardContextMenuObject instanceof PureRefProject.NoteObject note) {
+			note.color = color;
+			markBoardDirty();
+		} else if (boardContextMenuObject instanceof PureRefProject.ShapeObject shape) {
+			shape.color = color;
+			markBoardDirty();
+		}
+		closeBoardContextMenu();
+	}
+
+	private void renderBoardContextMenu(EmiDrawContext context, int mouseX, int mouseY) {
+		Bounds menu = getBoardContextMenuBounds();
+		context.push();
+		context.matrices().translate(0, 0, 500);
+		RenderSystem.disableDepthTest();
+		context.fill(menu.x() - 2, menu.y() - 2, menu.width() + 4, menu.height() + 4, 0x33000000);
+		context.fill(menu.x(), menu.y(), menu.width(), menu.height(), 0xF1181D24);
+		context.fill(menu.x(), menu.y(), menu.width(), 18, 0xFF253442);
+		context.drawTextWithShadow(EmiPort.literal("Color", Formatting.WHITE), menu.x() + 8, menu.y() + 5, -1);
+		int current = getBoardObjectColor(boardContextMenuObject);
+		for (int i = 0; i < BOARD_CONTEXT_COLORS.length; i++) {
+			Bounds swatch = getBoardContextColorBounds(menu, i);
+			int border = BOARD_CONTEXT_COLORS[i] == current ? 0xFFF3D77A : swatch.contains(mouseX, mouseY) ? 0xFFB7C8D8 : 0xFF3A4B5B;
+			context.fill(swatch.x() - 1, swatch.y() - 1, swatch.width() + 2, swatch.height() + 2, border);
+			context.fill(swatch.x(), swatch.y(), swatch.width(), swatch.height(), BOARD_CONTEXT_COLORS[i]);
+		}
+		RenderSystem.enableDepthTest();
+		context.pop();
+	}
+
+	private boolean handleBoardContextMenuClick(int mouseX, int mouseY, int button) {
+		if (boardContextMenuObject == null) {
+			return false;
+		}
+		Bounds menu = getBoardContextMenuBounds();
+		if (!menu.contains(mouseX, mouseY)) {
+			if (button == 0 || button == 1) {
+				closeBoardContextMenu();
+			}
+			return false;
+		}
+		if (button == 0 || button == 1) {
+			for (int i = 0; i < BOARD_CONTEXT_COLORS.length; i++) {
+				if (getBoardContextColorBounds(menu, i).contains(mouseX, mouseY)) {
+					applyBoardContextColor(BOARD_CONTEXT_COLORS[i]);
+					return true;
+				}
+			}
+		}
+		return true;
+	}
+
+	private PureRefProject.TreeObject findBoardTreeById(String objectId) {
+		if (objectId == null || objectId.isBlank()) {
+			return null;
+		}
+		for (PureRefProject.Object object : project().objects) {
+			if (object instanceof PureRefProject.TreeObject tree && objectId.equals(tree.id)) {
+				return tree;
+			}
+		}
+		return null;
+	}
+
+	private PureRefProject.TreeObject getChecklistTargetTree() {
+		if (selectedPureRefObject instanceof PureRefProject.TreeObject tree) {
+			return tree;
+		}
+		return findBoardTreeById(lastSelectedBoardTreeId);
+	}
+
+	private List<FlatMaterialCost> getTreeChecklistCosts(PureRefProject.TreeObject treeObject) {
+		if (treeObject == null) {
+			return List.of();
+		}
+		SavedRecipeTree.TreeBuildResult result = treeObject.buildTree();
+		if (result == null || result.tree == null) {
+			return List.of();
+		}
+		result.tree.calculateCost();
+		return Stream.concat(result.tree.cost.costs.values().stream(), result.tree.cost.chanceCosts.values().stream())
+			.sorted((a, b) -> Integer.compare(
+				EmiStackList.getIndex(a.ingredient.getEmiStacks().isEmpty() ? EmiStack.EMPTY : a.ingredient.getEmiStacks().get(0)),
+				EmiStackList.getIndex(b.ingredient.getEmiStacks().isEmpty() ? EmiStack.EMPTY : b.ingredient.getEmiStacks().get(0))
+			))
+			.toList();
+	}
+
+	private String getCheckListEntryLabel(FlatMaterialCost cost) {
+		if (cost.ingredient == null || cost.ingredient.getEmiStacks().isEmpty()) {
+			return "Item";
+		}
+		return cost.ingredient.getEmiStacks().get(0).getName().getString();
+	}
+
+	private void populateCheckListFromTree(PureRefProject.CheckListObject checkList, PureRefProject.TreeObject treeObject, boolean preserveProgress) {
+		if (checkList == null || treeObject == null) {
+			return;
+		}
+		Map<String, Long> existing = preserveProgress
+			? checkList.entries.stream().collect(Collectors.toMap(e -> e.ingredient == null ? e.label : e.ingredient.toString(), e -> e.currentAmount, (a, b) -> a))
+			: Map.of();
+		List<PureRefProject.CheckListEntry> entries = Lists.newArrayList();
+		for (FlatMaterialCost cost : getTreeChecklistCosts(treeObject)) {
+			JsonElement ingredientJson = EmiIngredientSerializer.getSerialized(cost.ingredient);
+			String key = ingredientJson == null ? getCheckListEntryLabel(cost) : ingredientJson.toString();
+			long current = preserveProgress ? existing.getOrDefault(key, 0L) : 0L;
+			entries.add(new PureRefProject.CheckListEntry(
+				PureRefProject.nextCheckListEntryId(),
+				getCheckListEntryLabel(cost),
+				current,
+				cost.getEffectiveAmount(),
+				ingredientJson,
+				null
+			));
+		}
+		if (entries.isEmpty()) {
+			entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
+		}
+		checkList.entries.clear();
+		checkList.entries.addAll(entries);
+		checkList.linkedTreeObjectId = treeObject.id;
+		checkList.title = (treeObject.title == null || treeObject.title.isBlank() ? "Checklist" : treeObject.title) + " Checklist";
+		editingCheckListRow = 0;
+		updateCheckListEditorFields();
+		markBoardDirty();
+	}
+
+	private EmiIngredient getCheckListIngredient(PureRefProject.CheckListEntry entry) {
+		if (entry == null || entry.ingredient == null) {
+			return EmiStack.EMPTY;
+		}
+		EmiIngredient ingredient = EmiIngredientSerializer.getDeserialized(entry.ingredient);
+		return ingredient == null ? EmiStack.EMPTY : ingredient;
+	}
+
+	private Bounds getCheckListListBounds(Bounds panel) {
+		return new Bounds(panel.x() + 12, panel.y() + 52, panel.width() - 24, 92);
+	}
+
+	private Bounds getCheckListEditorButtonBounds(Bounds panel, int row, int column, String label) {
+		int width = Math.max(60, textRenderer.getWidth(label) + 14);
+		int totalGap = 8;
+		int totalWidth = panel.width() - 24;
+		int x = panel.x() + 12 + column * ((totalWidth - totalGap) / 2 + totalGap);
+		int y = panel.y() + 220 + row * 20;
+		return new Bounds(x, y, (totalWidth - totalGap) / 2, 18);
+	}
+
+	private void renderCheckListEditor(EmiDrawContext context, int mouseX, int mouseY) {
+		Bounds panel = getCheckListEditorBounds();
+		Bounds list = getCheckListListBounds(panel);
+		context.push();
+		context.matrices().translate(0, 0, 500);
+		RenderSystem.disableDepthTest();
+		context.fill(panel.x() - 4, panel.y() - 4, panel.width() + 8, panel.height() + 8, 0x33000000);
+		context.fill(panel.x(), panel.y(), panel.width(), panel.height(), 0xF1161B14);
+		context.fill(panel.x(), panel.y(), panel.width(), 18, 0xFF2C221B);
+		context.drawTextWithShadow(EmiPort.literal("Checklist", Formatting.WHITE), panel.x() + 8, panel.y() + 5, -1);
+		context.fill(list.x(), list.y(), list.width(), list.height(), 0x66242B33);
+		int rowHeight = 14;
+		int visible = 6;
+		for (int i = 0; i < visible; i++) {
+			int index = editingCheckListScroll + i;
+			if (index >= editingCheckList.entries.size()) {
+				break;
+			}
+			PureRefProject.CheckListEntry entry = editingCheckList.entries.get(index);
+			int y = list.y() + 4 + i * rowHeight;
+			int bg = index == editingCheckListRow ? 0xFF34506A : 0x88303A45;
+			context.fill(list.x() + 2, y - 1, list.width() - 4, rowHeight - 1, bg);
+			EmiIngredient ingredient = getCheckListIngredient(entry);
+			if (!ingredient.isEmpty()) {
+				ingredient.render(context.raw(), list.x() + 6, y + 1, 0, 0);
+			}
+			int progressColor = entry.currentAmount >= entry.targetAmount && entry.targetAmount > 0 ? 0xFF9AD27A : 0xFFE7D9AA;
+			context.drawTextWithShadow(trimLibraryText(entry.label, list.width() - 86, Formatting.WHITE), list.x() + 24, y + 3, -1);
+			String amount = entry.currentAmount + "/" + entry.targetAmount;
+			context.drawTextWithShadow(EmiPort.literal(amount, Formatting.WHITE), list.x() + list.width() - textRenderer.getWidth(amount) - 8, y + 3, progressColor);
+		}
+		renderLibraryAction(context, getCheckListEditorButtonBounds(panel, 0, 0, "Add Row"), "Add Row", true, mouseX, mouseY);
+		renderLibraryAction(context, getCheckListEditorButtonBounds(panel, 0, 1, "Remove"), "Remove", getSelectedCheckListEntry() != null, mouseX, mouseY);
+		renderLibraryAction(context, getCheckListEditorButtonBounds(panel, 1, 0, "Link Tree"), "Link Tree", getChecklistTargetTree() != null, mouseX, mouseY);
+		renderLibraryAction(context, getCheckListEditorButtonBounds(panel, 1, 1, "From Tree"), "From Tree", getChecklistTargetTree() != null, mouseX, mouseY);
+		renderLibraryAction(context, getCheckListEditorButtonBounds(panel, 2, 0, "Refresh"), "Refresh", findBoardTreeById(editingCheckList.linkedTreeObjectId) != null, mouseX, mouseY);
+		String autoSyncLabel = editingCheckList.autoSync ? "Auto Sync: On" : "Auto Sync: Off";
+		renderLibraryAction(context, getCheckListEditorButtonBounds(panel, 2, 1, autoSyncLabel),
+			autoSyncLabel, editingCheckList.linkedTreeObjectId != null, mouseX, mouseY);
+		RenderSystem.enableDepthTest();
+		context.pop();
+	}
+
+	private boolean handleCheckListEditorClick(int mouseX, int mouseY, int button) {
+		if (editingCheckList == null || button != 0) {
+			return false;
+		}
+		Bounds panel = getCheckListEditorBounds();
+		if (!panel.contains(mouseX, mouseY)) {
+			return false;
+		}
+		if (checklistTitleField.isMouseOver(mouseX, mouseY)
+			|| checklistLabelField.isMouseOver(mouseX, mouseY)
+			|| checklistCurrentField.isMouseOver(mouseX, mouseY)
+			|| checklistTargetField.isMouseOver(mouseX, mouseY)) {
+			return false;
+		}
+		Bounds list = getCheckListListBounds(panel);
+		if (list.contains(mouseX, mouseY)) {
+			int local = (mouseY - list.y() - 4) / 14;
+			int index = editingCheckListScroll + local;
+			if (local >= 0 && index >= 0 && index < editingCheckList.entries.size()) {
+				editingCheckListRow = index;
+				updateCheckListEditorFields();
+				return true;
+			}
+		}
+		if (getCheckListEditorButtonBounds(panel, 0, 0, "Add Row").contains(mouseX, mouseY)) {
+			editingCheckList.entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
+			editingCheckListRow = editingCheckList.entries.size() - 1;
+			updateCheckListEditorFields();
+			markBoardDirty();
+			return true;
+		}
+		if (getCheckListEditorButtonBounds(panel, 0, 1, "Remove").contains(mouseX, mouseY)) {
+			PureRefProject.CheckListEntry entry = getSelectedCheckListEntry();
+			if (entry != null) {
+				editingCheckList.entries.remove(entry);
+				if (editingCheckList.entries.isEmpty()) {
+					editingCheckList.entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
+				}
+				editingCheckListRow = MathHelper.clamp(editingCheckListRow, 0, editingCheckList.entries.size() - 1);
+				updateCheckListEditorFields();
+				markBoardDirty();
+			}
+			return true;
+		}
+		if (getCheckListEditorButtonBounds(panel, 1, 0, "Link Tree").contains(mouseX, mouseY)) {
+			PureRefProject.TreeObject tree = getChecklistTargetTree();
+			if (tree != null) {
+				editingCheckList.linkedTreeObjectId = tree.id;
+				if (editingCheckList.title == null || editingCheckList.title.isBlank() || "Checklist".equals(editingCheckList.title)) {
+					editingCheckList.title = (tree.title == null || tree.title.isBlank() ? "Checklist" : tree.title) + " Checklist";
+				}
+				markBoardDirty();
+			}
+			return true;
+		}
+		if (getCheckListEditorButtonBounds(panel, 1, 1, "From Tree").contains(mouseX, mouseY)) {
+			PureRefProject.TreeObject tree = getChecklistTargetTree();
+			if (tree != null) {
+				populateCheckListFromTree(editingCheckList, tree, false);
+			}
+			return true;
+		}
+		if (getCheckListEditorButtonBounds(panel, 2, 0, "Refresh").contains(mouseX, mouseY)) {
+			PureRefProject.TreeObject tree = findBoardTreeById(editingCheckList.linkedTreeObjectId);
+			if (tree != null) {
+				populateCheckListFromTree(editingCheckList, tree, true);
+			}
+			return true;
+		}
+		if (getCheckListEditorButtonBounds(panel, 2, 1, editingCheckList.autoSync ? "Auto Sync: On" : "Auto Sync: Off").contains(mouseX, mouseY)
+			&& editingCheckList.linkedTreeObjectId != null) {
+			editingCheckList.autoSync = !editingCheckList.autoSync;
+			markBoardDirty();
+			return true;
+		}
+		return true;
 	}
 
 	private void normalizeInlineNoteWrapping() {
@@ -2498,15 +3059,7 @@ public class BoMScreen extends Screen {
 
 	private void commitNoteEditor() {
 		if (editingNote != null) {
-			String text = String.join("\n", editingNoteLines);
-			editingNote.title = "";
-			editingNote.body = text;
-			int width = 80;
-			for (String line : editingNoteLines) {
-				width = Math.max(width, textRenderer.getWidth(line.isEmpty() ? " " : line) + 6);
-			}
-			editingNote.width = width;
-			editingNote.height = Math.max(10, editingNoteLines.size() * 10);
+			syncEditingNoteToObject();
 		}
 		editingNote = null;
 		editingNoteLines = Lists.newArrayList();
@@ -2519,6 +3072,22 @@ public class BoMScreen extends Screen {
 		editingNoteLines = Lists.newArrayList();
 		editingNoteCursorLine = 0;
 		editingNoteCursorColumn = 0;
+	}
+
+	private void syncEditingNoteToObject() {
+		if (editingNote == null) {
+			return;
+		}
+		String text = String.join("\n", editingNoteLines);
+		editingNote.title = "";
+		editingNote.body = text;
+		int width = 80;
+		for (String line : editingNoteLines) {
+			width = Math.max(width, textRenderer.getWidth(line.isEmpty() ? " " : line) + 6);
+		}
+		editingNote.width = width;
+		editingNote.height = Math.max(10, editingNoteLines.size() * 10);
+		markBoardDirty();
 	}
 
 	private void setInlineNoteCursor(PureRefProject.NoteObject note, int canvasX, int canvasY) {
@@ -2548,6 +3117,10 @@ public class BoMScreen extends Screen {
 
 	private PureRefProject project() {
 		return BoM.pureRefProject;
+	}
+
+	private void markBoardDirty() {
+		BoM.markPureRefDirty();
 	}
 
 	private int getPureRefCanvasX(double mouseX) {
@@ -2583,6 +3156,8 @@ public class BoMScreen extends Screen {
 				renderPureRefTreeCard(context, raw, tree, canvasX, canvasY, delta);
 			} else if (object instanceof PureRefProject.NoteObject note) {
 				renderPureRefNote(context, note, canvasX, canvasY);
+			} else if (object instanceof PureRefProject.CheckListObject checkList) {
+				renderPureRefCheckList(context, checkList, canvasX, canvasY, delta);
 			}
 		}
 		if (pendingTreeInsert != null) {
@@ -2602,14 +3177,21 @@ public class BoMScreen extends Screen {
 		renderPureRefToolbar(context, mouseX, mouseY);
 		String hint = pendingTreeInsert != null
 			? "LMB: place tree  |  Esc: cancel placement"
-			: "MMB drag: pan  |  Wheel: zoom  |  Double click tree/note: edit  |  Del: remove  |  Ctrl+D: duplicate";
+			: "MMB drag: pan  |  Wheel: zoom  |  Double click tree/note/checklist: edit  |  Del: remove  |  Ctrl+D: duplicate";
 		context.drawTextWithShadow(EmiPort.literal(hint, Formatting.DARK_GRAY),
 			8, height - 28, -1);
 		if (pendingNoteDelete != null) {
 			renderNoteDeleteConfirmation(context, mouseX, mouseY);
 		}
+		if (boardContextMenuObject != null) {
+			renderBoardContextMenu(context, mouseX, mouseY);
+		}
 		if (editingNote != null) {
 			updateNoteEditorFields();
+		}
+		if (editingCheckList != null) {
+			updateCheckListEditorFields();
+			renderCheckListEditor(context, mouseX, mouseY);
 		}
 		if (projectLibraryOpen) {
 			projectScroll += (projectScrollTarget - projectScroll) * 0.35f;
@@ -2781,13 +3363,47 @@ public class BoMScreen extends Screen {
 		Bounds bounds = getPureRefNoteBounds(note);
 		List<String> lines = editingNote == note ? editingNoteLines : getPureRefNoteLines(note);
 		for (int i = 0; i < lines.size(); i++) {
-			context.drawTextWithShadow(EmiPort.literal(lines.get(i)), bounds.x(), bounds.y() + i * 10, 0xFFFFFFFF);
+			context.drawTextWithShadow(EmiPort.literal(lines.get(i)), bounds.x(), bounds.y() + i * 10, note.color);
 		}
 		if (editingNote == note && (System.currentTimeMillis() / 500) % 2 == 0) {
 			String line = editingNoteLines.get(editingNoteCursorLine);
 			int caretX = bounds.x() + textRenderer.getWidth(line.substring(0, Math.min(editingNoteCursorColumn, line.length())));
 			int caretY = bounds.y() + editingNoteCursorLine * 10;
 			context.fill(caretX, caretY, 1, 9, 0xFFFFFFFF);
+		}
+	}
+
+	private void renderPureRefCheckList(EmiDrawContext context, PureRefProject.CheckListObject checkList, int mouseX, int mouseY, float delta) {
+		Bounds bounds = new Bounds(checkList.x, checkList.y, checkList.width, checkList.height);
+		boolean hovered = bounds.contains(mouseX, mouseY);
+		context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), hovered ? 0xF12A3138 : 0xE021272E);
+		context.fill(bounds.x(), bounds.y(), bounds.width(), 18, 0xFF34465A);
+		context.fill(bounds.x(), bounds.y(), 3, bounds.height(), 0xFF9EB6CC);
+		String title = checkList.title == null || checkList.title.isBlank() ? "Checklist" : checkList.title;
+		context.drawTextWithShadow(trimLibraryText(title, bounds.width() - 16, Formatting.WHITE), bounds.x() + 8, bounds.y() + 5, -1);
+		String linkText = checkList.linkedTreeObjectId == null ? "Manual list" : "Linked tree";
+		context.drawTextWithShadow(EmiPort.literal(linkText, Formatting.DARK_GRAY), bounds.x() + 8, bounds.y() + bounds.height() - 13, -1);
+		int listY = bounds.y() + 24;
+		int rowHeight = 16;
+		int visibleRows = Math.max(1, Math.min(6, (bounds.height() - 42) / rowHeight));
+		for (int i = 0; i < visibleRows; i++) {
+			int index = i;
+			if (index >= checkList.entries.size()) {
+				break;
+			}
+			PureRefProject.CheckListEntry entry = checkList.entries.get(index);
+			int y = listY + i * rowHeight;
+			context.fill(bounds.x() + 6, y - 1, bounds.width() - 12, rowHeight - 2, index == editingCheckListRow && editingCheckList == checkList ? 0x77426788 : 0x44323A45);
+			EmiIngredient ingredient = getCheckListIngredient(entry);
+			if (!ingredient.isEmpty()) {
+				ingredient.render(context.raw(), bounds.x() + 10, y, delta, 0);
+			}
+			String amount = entry.currentAmount + "/" + entry.targetAmount;
+			int textX = bounds.x() + 28;
+			int amountWidth = textRenderer.getWidth(amount);
+			context.drawTextWithShadow(trimLibraryText(entry.label, bounds.width() - 44 - amountWidth, Formatting.WHITE), textX, y + 4, -1);
+			context.drawTextWithShadow(EmiPort.literal(amount, entry.currentAmount >= entry.targetAmount && entry.targetAmount > 0 ? Formatting.GREEN : Formatting.GOLD),
+				bounds.x() + bounds.width() - amountWidth - 10, y + 4, -1);
 		}
 	}
 
@@ -2871,6 +3487,8 @@ public class BoMScreen extends Screen {
 			return getPureRefTreeBounds(tree);
 		} else if (object instanceof PureRefProject.NoteObject note) {
 			return getPureRefNoteBounds(note);
+		} else if (object instanceof PureRefProject.CheckListObject checkList) {
+			return new Bounds(checkList.x, checkList.y, checkList.width, checkList.height);
 		} else if (object instanceof PureRefProject.ShapeObject shape) {
 			return getPureRefShapeBounds(shape);
 		}
@@ -3027,6 +3645,13 @@ public class BoMScreen extends Screen {
 			if (focusedPureRefTree.title == null || focusedPureRefTree.title.isBlank()) {
 				focusedPureRefTree.title = getDefaultTreeName();
 			}
+			for (PureRefProject.Object object : project().objects) {
+				if (object instanceof PureRefProject.CheckListObject checkList && checkList.autoSync
+					&& Objects.equals(checkList.linkedTreeObjectId, focusedPureRefTree.id)) {
+					populateCheckListFromTree(checkList, focusedPureRefTree, true);
+				}
+			}
+			markBoardDirty();
 		}
 		BoM.tree = previousFocusedTree;
 		BoM.craftingMode = previousFocusedCraftingMode;

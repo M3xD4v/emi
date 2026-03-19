@@ -125,6 +125,7 @@ public class PureRefProject {
 				case TREE -> TreeObject.load(id, x, y, json);
 				case NOTE -> NoteObject.load(id, x, y, json);
 				case SHAPE -> ShapeObject.load(id, x, y, json);
+				case CHECKLIST -> CheckListObject.load(id, x, y, json);
 			};
 		}
 	}
@@ -290,10 +291,129 @@ public class PureRefProject {
 		}
 	}
 
+	public static class CheckListObject extends Object {
+		public int width;
+		public int height;
+		public String title;
+		public @Nullable String linkedTreeObjectId;
+		public boolean autoSync;
+		public final List<CheckListEntry> entries = Lists.newArrayList();
+
+		public CheckListObject(String id, int x, int y, int width, int height, String title,
+				@Nullable String linkedTreeObjectId, boolean autoSync, List<CheckListEntry> entries) {
+			super(id, x, y);
+			this.width = width;
+			this.height = height;
+			this.title = title;
+			this.linkedTreeObjectId = linkedTreeObjectId;
+			this.autoSync = autoSync;
+			this.entries.addAll(entries);
+		}
+
+		@Override
+		public Type getType() {
+			return Type.CHECKLIST;
+		}
+
+		@Override
+		public Object copy() {
+			List<CheckListEntry> copiedEntries = Lists.newArrayList();
+			for (CheckListEntry entry : entries) {
+				copiedEntries.add(entry.copy());
+			}
+			return new CheckListObject(id, x, y, width, height, title, linkedTreeObjectId, autoSync, copiedEntries);
+		}
+
+		@Override
+		protected void saveData(JsonObject json) {
+			json.addProperty("width", width);
+			json.addProperty("height", height);
+			json.addProperty("title", title);
+			json.addProperty("auto_sync", autoSync);
+			if (linkedTreeObjectId != null && !linkedTreeObjectId.isBlank()) {
+				json.addProperty("linked_tree", linkedTreeObjectId);
+			}
+			JsonArray arr = new JsonArray();
+			for (CheckListEntry entry : entries) {
+				arr.add(entry.save());
+			}
+			json.add("entries", arr);
+		}
+
+		public static CheckListObject load(String id, int x, int y, JsonObject json) {
+			int width = JsonHelper.getInt(json, "width", 260);
+			int height = JsonHelper.getInt(json, "height", 160);
+			String title = JsonHelper.getString(json, "title", "Checklist");
+			String linkedTreeObjectId = JsonHelper.hasString(json, "linked_tree") ? JsonHelper.getString(json, "linked_tree") : null;
+			boolean autoSync = JsonHelper.getBoolean(json, "auto_sync", false);
+			List<CheckListEntry> entries = Lists.newArrayList();
+			JsonArray arr = JsonHelper.getArray(json, "entries", new JsonArray());
+			for (JsonElement el : arr) {
+				if (el.isJsonObject()) {
+					CheckListEntry entry = CheckListEntry.load(el.getAsJsonObject());
+					if (entry != null) {
+						entries.add(entry);
+					}
+				}
+			}
+			return new CheckListObject(id, x, y, width, height, title, linkedTreeObjectId, autoSync, entries);
+		}
+	}
+
+	public static class CheckListEntry {
+		public final String id;
+		public String label;
+		public long currentAmount;
+		public long targetAmount;
+		public @Nullable JsonElement ingredient;
+		public @Nullable String sourceTreePath;
+
+		public CheckListEntry(String id, String label, long currentAmount, long targetAmount,
+				@Nullable JsonElement ingredient, @Nullable String sourceTreePath) {
+			this.id = id;
+			this.label = label;
+			this.currentAmount = currentAmount;
+			this.targetAmount = targetAmount;
+			this.ingredient = ingredient;
+			this.sourceTreePath = sourceTreePath;
+		}
+
+		public CheckListEntry copy() {
+			return new CheckListEntry(id, label, currentAmount, targetAmount,
+				ingredient == null ? null : ingredient.deepCopy(), sourceTreePath);
+		}
+
+		public JsonObject save() {
+			JsonObject json = new JsonObject();
+			json.addProperty("id", id);
+			json.addProperty("label", label);
+			json.addProperty("current_amount", currentAmount);
+			json.addProperty("target_amount", targetAmount);
+			if (ingredient != null) {
+				json.add("ingredient", ingredient.deepCopy());
+			}
+			if (sourceTreePath != null && !sourceTreePath.isBlank()) {
+				json.addProperty("source_tree_path", sourceTreePath);
+			}
+			return json;
+		}
+
+		public static @Nullable CheckListEntry load(JsonObject json) {
+			String id = JsonHelper.getString(json, "id", nextCheckListEntryId());
+			String label = JsonHelper.getString(json, "label", "Item");
+			long currentAmount = JsonHelper.getLong(json, "current_amount", 0);
+			long targetAmount = JsonHelper.getLong(json, "target_amount", 0);
+			JsonElement ingredient = JsonHelper.hasElement(json, "ingredient") ? json.get("ingredient") : null;
+			String sourceTreePath = JsonHelper.hasString(json, "source_tree_path") ? JsonHelper.getString(json, "source_tree_path") : null;
+			return new CheckListEntry(id, label, currentAmount, targetAmount, ingredient, sourceTreePath);
+		}
+	}
+
 	public static enum Type {
 		TREE,
 		NOTE,
-		SHAPE
+		SHAPE,
+		CHECKLIST
 	}
 
 	public static enum ShapeType {
@@ -304,5 +424,9 @@ public class PureRefProject {
 
 	public static String nextObjectId() {
 		return EmiPort.id("pure_ref", Long.toString(System.nanoTime())).toString();
+	}
+
+	public static String nextCheckListEntryId() {
+		return EmiPort.id("pure_ref_checklist_entry", Long.toString(System.nanoTime())).toString();
 	}
 }
