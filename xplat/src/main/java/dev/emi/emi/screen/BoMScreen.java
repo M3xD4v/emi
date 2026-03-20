@@ -1143,18 +1143,24 @@ public class BoMScreen extends Screen {
 			return new Bounds(0, 0, 0, 0);
 		}
 		int width = 120;
-		int height = ContextAction.values().length * 20 + 4;
+		int height = ContextAction.values().length * 20 + 38;
 		int x = MathHelper.clamp(contextMenuX + 6, 6, width > this.width - 12 ? 6 : this.width - width - 6);
 		int y = MathHelper.clamp(contextMenuY + 6, 24, height > this.height - 30 ? 24 : this.height - height - 6);
 		return new Bounds(x, y, width, height);
 	}
 
 	private Bounds getContextActionBounds(Bounds menu, int index) {
-		return new Bounds(menu.x() + 2, menu.y() + 2 + index * 20, menu.width() - 4, 18);
+		return new Bounds(menu.x() + 2, menu.y() + 36 + index * 20, menu.width() - 4, 18);
 	}
 
 	private String getContextLabel(ContextAction action) {
 		return switch (action) {
+			case CENTER -> "Center Here";
+			case FIT_BRANCH -> "Fit Branch";
+			case FIT_TREE -> "Fit Tree";
+			case RESET_NODE -> "Reset Position";
+			case RESET_BRANCH -> "Reset Branch Layout";
+			case RESET_TREE -> "Reset Tree Layout";
 			case COMPARE -> "Compare";
 			case AUTO -> "Auto";
 			case CLEAR -> "Clear";
@@ -1169,6 +1175,10 @@ public class BoMScreen extends Screen {
 			return false;
 		}
 		return switch (action) {
+			case CENTER, FIT_BRANCH, FIT_TREE, RECIPES -> true;
+			case RESET_NODE -> hasManualOffset(node.path);
+			case RESET_BRANCH -> hasBranchOffsets(node.path);
+			case RESET_TREE -> BoM.tree != null && !BoM.tree.nodeOffsets.isEmpty();
 			case COMPARE -> node.node.ingredient.getEmiStacks().size() == 1;
 			case AUTO -> {
 				Hover hover = new Hover(node.node.ingredient, node.node, node.resolution, node);
@@ -1176,7 +1186,6 @@ public class BoMScreen extends Screen {
 				});
 			}
 			case CLEAR -> node.node.recipe != null;
-			case RECIPES -> true;
 			case FOLD -> node.node.recipe != null && !(node.node.recipe instanceof EmiResolutionRecipe)
 				&& node.node.state == FoldState.EXPANDED;
 			case UNFOLD -> node.node.recipe != null && !(node.node.recipe instanceof EmiResolutionRecipe)
@@ -1195,9 +1204,17 @@ public class BoMScreen extends Screen {
 		Bounds menu = getContextMenuBounds();
 		context.fill(menu.x() - 1, menu.y() - 1, menu.width() + 2, menu.height() + 2, 0xAA0E141B);
 		context.fill(menu.x(), menu.y(), menu.width(), menu.height(), 0xF11C2936);
+		String nodeName = node.node.ingredient.getEmiStacks().isEmpty() ? "Node" : node.node.ingredient.getEmiStacks().get(0).getName().getString();
+		context.fill(menu.x(), menu.y(), menu.width(), 34, 0xFF253442);
+		context.drawTextWithShadow(trimLibraryText(nodeName, menu.width() - 12, Formatting.WHITE), menu.x() + 6, menu.y() + 6, -1);
+		String state = getNodeStatusSummary(node);
+		context.drawTextWithShadow(trimLibraryText(state, menu.width() - 12, Formatting.GRAY), menu.x() + 6, menu.y() + 19, -1);
 		for (int i = 0; i < ContextAction.values().length; i++) {
 			ContextAction action = ContextAction.values()[i];
 			Bounds bounds = getContextActionBounds(menu, i);
+			if (action == ContextAction.COMPARE || action == ContextAction.RECIPES) {
+				context.fill(bounds.x(), bounds.y() - 1, bounds.width(), 1, 0x33273A4D);
+			}
 			boolean active = isContextEnabled(action, node);
 			int color = active ? (bounds.contains(mouseX, mouseY) ? 0xFF6E97BF : 0xFF355069) : 0xFF26303A;
 			context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), color);
@@ -1225,6 +1242,21 @@ public class BoMScreen extends Screen {
 				continue;
 			}
 			switch (action) {
+				case CENTER -> centerOnNode(node.path);
+				case FIT_BRANCH -> fitNodesToViewport(getNodesForPath(node.path));
+				case FIT_TREE -> fitNodesToViewport(nodes);
+				case RESET_NODE -> {
+					resetNodeOffset(node.path);
+					recalculateTree(node.path);
+				}
+				case RESET_BRANCH -> {
+					resetBranchOffsets(node.path);
+					recalculateTree(node.path);
+				}
+				case RESET_TREE -> {
+					resetAllOffsets();
+					recalculateTree();
+				}
 				case COMPARE -> {
 					if (toggleComparison(node.node)) {
 						recalculateTree(node.path);
@@ -1342,11 +1374,15 @@ public class BoMScreen extends Screen {
 		if (loadWarning) {
 			context.drawTextWithShadow(EmiPort.literal("Loaded recipe tree with missing data", Formatting.YELLOW), 8, 34, -1);
 		}
+		Hover hover = getHoveredStack(mouseX, mouseY);
+		if (BoM.tree != null) {
+			context.drawTextWithShadow(EmiPort.literal(getTreeStatusSummary(), Formatting.GRAY), 8, height - 42, -1);
+		}
 		if (focusedPureRefTree != null) {
 			context.drawTextWithShadow(EmiPort.literal("Editing embedded tree  |  Back To Board saves changes to the Board View project", Formatting.DARK_GRAY),
 				8, height - 42, -1);
 		}
-		context.drawTextWithShadow(EmiPort.literal("RMB node: menu  |  LMB drag: move node  |  Ctrl+LMB drag: move branch  |  MMB drag background: pan", Formatting.DARK_GRAY),
+		context.drawTextWithShadow(EmiPort.literal(getTreeInteractionHint(mouseX, mouseY, hover, mx, my), Formatting.DARK_GRAY),
 			8, height - 28, -1);
 		if (libraryOpen && viewMode == ViewMode.TREE) {
 			libraryScroll += (libraryScrollTarget - libraryScroll) * 0.35f;
@@ -1357,8 +1393,6 @@ public class BoMScreen extends Screen {
 			renderLibraryOverlay(context, raw, mouseX, mouseY, delta);
 		}
 		super.render(raw, mouseX, mouseY, delta);
-
-		Hover hover = getHoveredStack(mouseX, mouseY);
 		if (getContextMenuNode() != null) {
 			renderContextMenu(context, mouseX, mouseY);
 		} else if (hover != null) {
@@ -1380,6 +1414,7 @@ public class BoMScreen extends Screen {
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Ctrl + Left drag: move branch", Formatting.GRAY)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Middle drag on background: pan view", Formatting.GRAY)));
 			list.add(EmiTooltipComponents.of(EmiPort.literal("Left click compare candidate: select recipe", Formatting.GRAY)));
+			list.add(EmiTooltipComponents.of(EmiPort.literal("Node menu: center, fit, reset layout", Formatting.GRAY)));
 			EmiRenderHelper.drawTooltip(this, context, list, width - 18, height - 18, width);
 		}
 	}
@@ -1409,6 +1444,12 @@ public class BoMScreen extends Screen {
 	}
 
 	private enum ContextAction {
+		CENTER,
+		FIT_BRANCH,
+		FIT_TREE,
+		RESET_NODE,
+		RESET_BRANCH,
+		RESET_TREE,
 		COMPARE,
 		AUTO,
 		CLEAR,
@@ -1880,6 +1921,158 @@ public class BoMScreen extends Screen {
 			}
 		}
 		return false;
+	}
+
+	private boolean hasManualOffset(String path) {
+		if (BoM.tree == null || path == null) {
+			return false;
+		}
+		MaterialTree.NodeOffset offset = BoM.tree.nodeOffsets.get(path);
+		return offset != null && (offset.x() != 0 || offset.y() != 0);
+	}
+
+	private boolean hasBranchOffsets(String path) {
+		if (BoM.tree == null || path == null) {
+			return false;
+		}
+		return BoM.tree.nodeOffsets.entrySet().stream().anyMatch(e ->
+			(e.getKey().equals(path) || e.getKey().startsWith(path + "/"))
+				&& e.getValue() != null
+				&& (e.getValue().x() != 0 || e.getValue().y() != 0));
+	}
+
+	private void resetNodeOffset(String path) {
+		if (BoM.tree == null || path == null) {
+			return;
+		}
+		BoM.tree.nodeOffsets.remove(path);
+	}
+
+	private void resetBranchOffsets(String path) {
+		if (BoM.tree == null || path == null) {
+			return;
+		}
+		BoM.tree.nodeOffsets.entrySet().removeIf(e -> e.getKey().equals(path) || e.getKey().startsWith(path + "/"));
+	}
+
+	private void resetAllOffsets() {
+		if (BoM.tree != null) {
+			BoM.tree.nodeOffsets.clear();
+		}
+	}
+
+	private List<Node> getNodesForPath(String path) {
+		return nodes.stream()
+			.filter(n -> n.path.equals(path) || n.path.startsWith(path + "/"))
+			.toList();
+	}
+
+	private void centerOnNode(String path) {
+		Node node = nodes.stream().filter(n -> n.path.equals(path)).findFirst().orElse(null);
+		if (node == null) {
+			return;
+		}
+		offX = -node.x;
+		offY = -node.y;
+	}
+
+	private void fitNodesToViewport(List<Node> targetNodes) {
+		if (targetNodes == null || targetNodes.isEmpty()) {
+			return;
+		}
+		int minLeft = Integer.MAX_VALUE;
+		int maxRight = Integer.MIN_VALUE;
+		int minTop = Integer.MAX_VALUE;
+		int maxBottom = Integer.MIN_VALUE;
+		for (Node node : targetNodes) {
+			minLeft = Math.min(minLeft, node.getLeft() - 12);
+			maxRight = Math.max(maxRight, node.getRight() + 12);
+			minTop = Math.min(minTop, node.getTop() - 16);
+			maxBottom = Math.max(maxBottom, node.getBottom() + 16);
+		}
+		if (minLeft == Integer.MAX_VALUE) {
+			return;
+		}
+		int contentWidth = Math.max(32, maxRight - minLeft);
+		int contentHeight = Math.max(32, maxBottom - minTop);
+		int scaleBase = (int) this.client.getWindow().getScaleFactor();
+		int bestZoom = -6;
+		for (int candidate = 4; candidate >= -6; candidate--) {
+			int desired = scaleBase + candidate;
+			if (desired < 1) {
+				continue;
+			}
+			float s = (float) desired / scaleBase;
+			if (contentWidth * s <= width - 80 && contentHeight * s <= height - 120) {
+				bestZoom = candidate;
+				break;
+			}
+		}
+		zoom = bestZoom;
+		offX = -((minLeft + maxRight) / 2f);
+		offY = -((minTop + maxBottom) / 2f);
+	}
+
+	private String getNodeStatusSummary(Node node) {
+		List<String> parts = Lists.newArrayList();
+		if (node.node.missing) {
+			parts.add("Missing");
+		}
+		if (hasManualOffset(node.path)) {
+			parts.add("Moved");
+		}
+		if (BoM.tree != null && BoM.tree.resolutions.containsKey(node.node.ingredient)) {
+			parts.add("Manual Recipe");
+		}
+		if (node.node.hasComparisons()) {
+			parts.add("Compare Open");
+		}
+		if (parts.isEmpty()) {
+			parts.add(node.node.recipe == null ? "Ingredient" : "Recipe Node");
+		}
+		return String.join("  |  ", parts);
+	}
+
+	private String getTreeStatusSummary() {
+		if (BoM.tree == null) {
+			return "";
+		}
+		List<String> parts = Lists.newArrayList();
+		if (!BoM.tree.nodeOffsets.isEmpty()) {
+			parts.add("Manual Layout Active");
+		}
+		if (nodes.stream().anyMatch(n -> n.node.hasComparisons())) {
+			parts.add("Compare Open");
+		}
+		if (nodes.stream().anyMatch(n -> n.node.missing)) {
+			parts.add("Missing Data");
+		}
+		if (parts.isEmpty()) {
+			parts.add("Tree Ready");
+		}
+		return String.join("  |  ", parts);
+	}
+
+	private String getTreeInteractionHint(int mouseX, int mouseY, Hover hover, int mx, int my) {
+		if (getContextMenuNode() != null) {
+			return "Tree menu open  |  LMB action  |  Click outside to close";
+		}
+		if (hover != null && hover.renderNode != null && hover.renderNode.comparisonCandidate) {
+			return "Compare candidate  |  LMB select recipe  |  RMB node menu";
+		}
+		if (hover != null && hover.node != null) {
+			boolean moved = hover.renderNode != null && hasManualOffset(hover.renderNode.path);
+			return moved
+				? "Node hovered  |  RMB menu  |  LMB drag move  |  Ctrl+LMB drag branch  |  Reset Position in menu"
+				: "Node hovered  |  RMB menu  |  LMB drag move  |  Ctrl+LMB drag branch  |  Compare and layout tools in menu";
+		}
+		if (BoM.tree != null && batches.contains(mx, my)) {
+			return "Batch control  |  Wheel adjust batches  |  LMB set ideal batch";
+		}
+		if (BoM.tree != null && mode.contains(mx, my)) {
+			return "Mode toggle  |  Switch between view and craft progress";
+		}
+		return "Canvas  |  MMB drag pan  |  RMB node menu  |  Use menu for center, fit, reset, compare";
 	}
 
 	private void moveInlineNoteCursorToPreviousWord() {
@@ -2723,6 +2916,11 @@ public class BoMScreen extends Screen {
 		}
 		RenderSystem.enableDepthTest();
 		context.pop();
+	}
+
+	private void renderNodeBadge(EmiDrawContext context, int x, int y, int color) {
+		context.fill(x, y, 5, 5, 0xFF11161D);
+		context.fill(x + 1, y + 1, 3, 3, color);
 	}
 
 	private boolean handleBoardContextMenuClick(int mouseX, int mouseY, int button) {
@@ -3949,6 +4147,23 @@ public class BoMScreen extends Screen {
 			context.setColor(1f, 1f, 1f, 1f);
 			node.ingredient.render(context.raw(), x + xo - 8 + midOffset, y - 8, 0, -1);
 			EmiRenderHelper.renderAmount(context, x + xo - 8 + midOffset, y - 8, getAmountText());
+			int badgeX = x + xo + midOffset + 9;
+			int badgeY = y - 15;
+			if (node.missing) {
+				renderNodeBadge(context, badgeX, badgeY, 0xFFE46B6B);
+				badgeX += 6;
+			}
+			if (BoM.tree != null && BoM.tree.resolutions.containsKey(node.ingredient)) {
+				renderNodeBadge(context, badgeX, badgeY, 0xFFF0D46A);
+				badgeX += 6;
+			}
+			if (BoM.tree != null && BoM.tree.nodeOffsets.containsKey(path)) {
+				renderNodeBadge(context, badgeX, badgeY, 0xFF89B8E8);
+				badgeX += 6;
+			}
+			if (node.hasComparisons()) {
+				renderNodeBadge(context, badgeX, badgeY, 0xFFB8E6A1);
+			}
 		}
 
 		public void setColor(EmiDrawContext context, int baseColor, MaterialNode node, boolean chanced, boolean hovered) {
