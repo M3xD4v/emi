@@ -962,7 +962,7 @@ public class BoMScreen extends Screen {
 				return slot;
 			}
 		}
-		return Math.max(1, selectedProjectSlot <= 0 ? 1 : Math.min(selectedProjectSlot + 1, BoM.PURE_REF_SLOT_COUNT - 1));
+		return -1;
 	}
 
 	private void duplicateProjectSlot(int slot) {
@@ -1019,7 +1019,7 @@ public class BoMScreen extends Screen {
 				: project.isEmpty() ? (slot + 1) + ". Empty Project" : (slot + 1) + ". " + (project.name == null || project.name.isBlank() ? "Project" : project.name);
 			context.drawTextWithShadow(trimLibraryText(title, row.width() - 160, project.isEmpty() ? Formatting.DARK_GRAY : Formatting.WHITE),
 				row.x() + 10, row.y() + 8, -1);
-			String summary = getProjectSummary(project, slot == 0);
+		String summary = getProjectSummary(project, slot == 0);
 			context.drawTextWithShadow(trimLibraryText(summary, row.width() - 160, Formatting.DARK_GRAY), row.x() + 10, row.y() + 22, -1);
 			LibraryRowButtons buttons = getProjectRowButtons(row);
 			renderLibraryAction(context, buttons.load, "Load", slot == 0 || !project.isEmpty(), mouseX, mouseY);
@@ -1027,7 +1027,8 @@ public class BoMScreen extends Screen {
 			renderLibraryAction(context, buttons.rename, "Rename", slot == 0 || !project.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.delete, "Delete", slot != 0 && !project.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.replace, "Replace", true, mouseX, mouseY);
-			renderLibraryAction(context, buttons.duplicate, "Duplicate", slot == 0 || !project.isEmpty(), mouseX, mouseY);
+			renderLibraryAction(context, buttons.duplicate, "Duplicate",
+				(slot == 0 || !project.isEmpty()) && getDuplicateProjectTargetSlot() > 0, mouseX, mouseY);
 		}
 		RenderSystem.enableDepthTest();
 		context.pop();
@@ -1082,7 +1083,7 @@ public class BoMScreen extends Screen {
 				saveProjectToSlot(slot, true);
 				return true;
 			}
-			if (buttons.duplicate.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
+			if (buttons.duplicate.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty()) && getDuplicateProjectTargetSlot() > 0) {
 				duplicateProjectSlot(slot);
 				return true;
 			}
@@ -2513,10 +2514,18 @@ public class BoMScreen extends Screen {
 		if (BoM.tree == null) {
 			return;
 		}
-		Set<String> openComparisons = captureOpenComparisonPaths(null);
-		for (String path : openComparisons.stream().sorted(Comparator.comparingInt(String::length)).toList()) {
+		List<String> openComparisons = captureOpenComparisonPaths(null).stream()
+			.sorted(Comparator.comparingInt(String::length))
+			.toList();
+		for (String path : openComparisons) {
 			MaterialNode node = getNodeByPath(path);
-			if (node != null && !node.hasComparisons()) {
+			if (node != null) {
+				node.clearComparisons();
+			}
+		}
+		for (String path : openComparisons) {
+			MaterialNode node = getNodeByPath(path);
+			if (node != null) {
 				toggleComparison(node);
 			}
 		}
