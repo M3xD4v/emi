@@ -580,6 +580,8 @@ public class BoMScreen extends Screen {
 		int right = row.x() + row.width() - 10;
 		Bounds replace = getLibraryButtonBounds(row, right, "Replace");
 		right = replace.x() - 6;
+		Bounds duplicate = getLibraryButtonBounds(row, right, "Save");
+		right = duplicate.x() - 6;
 		Bounds delete = getLibraryButtonBounds(row, right, "Delete");
 		right = delete.x() - 6;
 		Bounds rename = getLibraryButtonBounds(row, right, "Rename");
@@ -587,7 +589,7 @@ public class BoMScreen extends Screen {
 		Bounds save = getLibraryButtonBounds(row, right, "Save");
 		right = save.x() - 6;
 		Bounds load = getLibraryButtonBounds(row, right, "Load");
-		return new LibraryRowButtons(load, save, rename, delete, replace);
+		return new LibraryRowButtons(load, save, rename, delete, replace, duplicate);
 	}
 
 	private Text trimLibraryText(String text, int width, Formatting formatting) {
@@ -801,6 +803,8 @@ public class BoMScreen extends Screen {
 		int right = row.x() + row.width() - 10;
 		Bounds replace = getProjectButtonBounds(row, right, "Replace");
 		right = replace.x() - 6;
+		Bounds duplicate = getProjectButtonBounds(row, right, "Duplicate");
+		right = duplicate.x() - 6;
 		Bounds delete = getProjectButtonBounds(row, right, "Delete");
 		right = delete.x() - 6;
 		Bounds rename = getProjectButtonBounds(row, right, "Rename");
@@ -808,7 +812,7 @@ public class BoMScreen extends Screen {
 		Bounds save = getProjectButtonBounds(row, right, "Save");
 		right = save.x() - 6;
 		Bounds load = getProjectButtonBounds(row, right, "Load");
-		return new LibraryRowButtons(load, save, rename, delete, replace);
+		return new LibraryRowButtons(load, save, rename, delete, replace, duplicate);
 	}
 
 	private void updateProjectRenameField() {
@@ -952,6 +956,35 @@ public class BoMScreen extends Screen {
 		selectedProjectSlot = slot;
 	}
 
+	private int getDuplicateProjectTargetSlot() {
+		for (int slot = 1; slot < BoM.PURE_REF_SLOT_COUNT; slot++) {
+			if (BoM.getSavedPureRefProject(slot).isEmpty()) {
+				return slot;
+			}
+		}
+		return Math.max(1, selectedProjectSlot <= 0 ? 1 : Math.min(selectedProjectSlot + 1, BoM.PURE_REF_SLOT_COUNT - 1));
+	}
+
+	private void duplicateProjectSlot(int slot) {
+		PureRefProject source = slot == 0 ? project().copy() : BoM.getSavedPureRefProject(slot).copy();
+		if (slot != 0 && source.isEmpty()) {
+			return;
+		}
+		int targetSlot = getDuplicateProjectTargetSlot();
+		if (targetSlot <= 0 || targetSlot >= BoM.PURE_REF_SLOT_COUNT) {
+			return;
+		}
+		String baseName = source.name == null || source.name.isBlank()
+			? (slot == 0 ? "World Project" : "Project")
+			: source.name;
+		source.name = baseName + " Copy";
+		source.offX = slot == 0 ? offX : source.offX;
+		source.offY = slot == 0 ? offY : source.offY;
+		source.zoom = slot == 0 ? zoom : source.zoom;
+		BoM.savePureRefProject(targetSlot, source);
+		selectedProjectSlot = targetSlot;
+	}
+
 	private void renderProjectOverlay(EmiDrawContext context, int mouseX, int mouseY) {
 		context.push();
 		context.matrices().translate(0, 0, 500);
@@ -994,6 +1027,7 @@ public class BoMScreen extends Screen {
 			renderLibraryAction(context, buttons.rename, "Rename", slot == 0 || !project.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.delete, "Delete", slot != 0 && !project.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.replace, "Replace", true, mouseX, mouseY);
+			renderLibraryAction(context, buttons.duplicate, "Duplicate", slot == 0 || !project.isEmpty(), mouseX, mouseY);
 		}
 		RenderSystem.enableDepthTest();
 		context.pop();
@@ -1046,6 +1080,10 @@ public class BoMScreen extends Screen {
 			}
 			if (buttons.replace.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
 				saveProjectToSlot(slot, true);
+				return true;
+			}
+			if (buttons.duplicate.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
+				duplicateProjectSlot(slot);
 				return true;
 			}
 			long now = System.currentTimeMillis();
@@ -1604,7 +1642,7 @@ public class BoMScreen extends Screen {
 	private record NodePosition(int x, int y, String structureKey) {
 	}
 
-	private record LibraryRowButtons(Bounds load, Bounds save, Bounds rename, Bounds delete, Bounds replace) {
+	private record LibraryRowButtons(Bounds load, Bounds save, Bounds rename, Bounds delete, Bounds replace, Bounds duplicate) {
 	}
 
 	private enum ContextAction {
