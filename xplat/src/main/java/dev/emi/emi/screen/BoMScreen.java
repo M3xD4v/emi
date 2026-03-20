@@ -4691,40 +4691,31 @@ public class BoMScreen extends Screen {
 				xo = 11;
 				context.pop();
 				if (comparisonCandidate) {
-					MicroTextRenderer.render(context, comparisonCost, false, 18, x + width / 2 - 1, y - 12, comparisonSelected ? 0xFFF0D46A : 0xFFB5C6D8);
-					int pillX = x - width / 2;
-					int pillY = y - 24;
-					renderComparePill(context, "#" + comparisonRank, pillX, pillY, 0xD019232D, 0xFFD5E4F3);
-					pillX += textRenderer.getWidth("#" + comparisonRank) + 10;
-					if (comparisonPreferred) {
-						renderComparePill(context, "Best", pillX, pillY, 0xE0355D2D, 0xFFE4F8E0);
-						pillX += textRenderer.getWidth("Best") + 10;
-					}
+					MicroTextRenderer.render(context, comparisonCost, false, 18, x + width / 2 - 2, y - 9, comparisonSelected ? 0xFFF0D46A : 0xFFB5C6D8);
+					String rankText = "#" + comparisonRank;
+					context.drawTextWithShadow(EmiPort.literal(rankText, comparisonPreferred ? Formatting.GREEN : Formatting.GRAY),
+						x - width / 2 + 3, y - 8, comparisonPreferred ? 0xFFE4F8E0 : 0xFFCAD5E0);
+					int stateBadgeX = x + width / 2 - 5;
+					int stateBadgeY = y + 4;
 					if (comparisonSelected) {
-						renderComparePill(context, "Current", pillX, pillY, 0xE0A37C19, 0xFFFFF5D0);
-						pillX += textRenderer.getWidth("Current") + 10;
+						renderNodeBadge(context, stateBadgeX, stateBadgeY, 0xFFF0D46A);
+						stateBadgeX -= 6;
+					}
+					if (comparisonPreferred) {
+						renderNodeBadge(context, stateBadgeX, stateBadgeY, 0xFF7FD18B);
+						stateBadgeX -= 6;
 					}
 					if (comparisonCheapest) {
-						renderComparePill(context, "Cheapest", pillX, pillY, 0xE0245943, 0xFFDDF8EA);
-						pillX += textRenderer.getWidth("Cheapest") + 10;
+						renderNodeBadge(context, stateBadgeX, stateBadgeY, 0xFF54B88A);
+						stateBadgeX -= 6;
 					}
 					if (comparisonFastest) {
-						renderComparePill(context, "Fastest", pillX, pillY, 0xE0244260, 0xFFDDEFFF);
-						pillX += textRenderer.getWidth("Fastest") + 10;
+						renderNodeBadge(context, stateBadgeX, stateBadgeY, 0xFF73B7F3);
+						stateBadgeX -= 6;
 					}
 					if (comparisonMissingInputs > 0) {
-						renderComparePill(context, "Missing", pillX, pillY, 0xE0652828, 0xFFFFE3E3);
+						renderNodeBadge(context, stateBadgeX, stateBadgeY, 0xFFE46B6B);
 					}
-					String detail = switch (compareRankMode) {
-						case CHEAPEST_INPUTS -> comparisonSteps <= 1 ? "1 step" : comparisonSteps + " steps";
-						case FEWEST_STEPS -> comparisonSteps <= 1 ? "1 step" : comparisonSteps + " steps";
-						case INVENTORY_FRIENDLY -> comparisonInputTypes == 1 ? "1 input type" : comparisonInputTypes + " input types";
-						case LOWEST_MISSING -> comparisonMissingInputs == 1 ? "1 missing node" : comparisonMissingInputs + " missing nodes";
-					};
-					int detailWidth = textRenderer.getWidth(detail) + 6;
-					int detailX = x - detailWidth / 2;
-					context.fill(detailX, y + 12, detailWidth, 9, 0xC0151B24);
-					context.drawTextWithShadow(EmiPort.literal(detail, Formatting.GRAY), detailX + 3, y + 13, -1);
 				}
 			}
 			context.setColor(1f, 1f, 1f, 1f);
