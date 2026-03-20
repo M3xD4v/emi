@@ -528,14 +528,16 @@ public class BoMScreen extends Screen {
 
 	private LibraryRowButtons getLibraryRowButtons(Bounds row) {
 		int right = row.x() + row.width() - 10;
-		Bounds override = getLibraryButtonBounds(row, right, "Override");
-		right = override.x() - 6;
+		Bounds replace = getLibraryButtonBounds(row, right, "Replace");
+		right = replace.x() - 6;
 		Bounds delete = getLibraryButtonBounds(row, right, "Delete");
 		right = delete.x() - 6;
 		Bounds rename = getLibraryButtonBounds(row, right, "Rename");
 		right = rename.x() - 6;
 		Bounds save = getLibraryButtonBounds(row, right, "Save");
-		return new LibraryRowButtons(save, rename, delete, override);
+		right = save.x() - 6;
+		Bounds load = getLibraryButtonBounds(row, right, "Load");
+		return new LibraryRowButtons(load, save, rename, delete, replace);
 	}
 
 	private Text trimLibraryText(String text, int width, Formatting formatting) {
@@ -594,7 +596,7 @@ public class BoMScreen extends Screen {
 		int hintX = panel.x() + 124;
 		int hintWidth = getLibraryHeaderButton(panel).x() - hintX - 8;
 		if (hintWidth > 36) {
-			context.drawTextWithShadow(trimLibraryText("Double-click to load", hintWidth, Formatting.DARK_GRAY), hintX, panel.y() + 10, -1);
+			context.drawTextWithShadow(trimLibraryText("Use Load or double-click", hintWidth, Formatting.DARK_GRAY), hintX, panel.y() + 10, -1);
 		}
 		int rowHeight = getLibraryRowHeight();
 		int firstRow = Math.max(0, (int) Math.floor(libraryScroll));
@@ -634,13 +636,14 @@ public class BoMScreen extends Screen {
 				context.drawTextWithShadow(trimLibraryText("Missing data", textWidth, Formatting.RED),
 					textX, row.y() + 22, -1);
 			} else if (!compactLibrary) {
-				context.drawTextWithShadow(trimLibraryText(saved.isEmpty() ? "Save current tree here" : "Stored tree snapshot", textWidth, Formatting.DARK_GRAY),
+				context.drawTextWithShadow(trimLibraryText(getSavedTreeSummary(saved), textWidth, Formatting.DARK_GRAY),
 					textX, row.y() + 22, -1);
 			}
+			renderLibraryAction(context, buttons.load, "Load", !saved.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.save, "Save", canSaveToSlot(saved), mouseX, mouseY);
 			renderLibraryAction(context, buttons.rename, "Rename", !saved.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.delete, "Delete", !saved.isEmpty(), mouseX, mouseY);
-			renderLibraryAction(context, buttons.override, "Override", canOverrideSlot(saved), mouseX, mouseY);
+			renderLibraryAction(context, buttons.replace, "Replace", canOverrideSlot(saved), mouseX, mouseY);
 		}
 		if (getLibraryMaxScroll() > 0) {
 			int trackX = panel.x() + panel.width() - 7;
@@ -671,6 +674,45 @@ public class BoMScreen extends Screen {
 
 	private boolean canOverrideSlot(SavedRecipeTree slot) {
 		return !slot.isEmpty() && createSnapshot() != null;
+	}
+
+	private void loadTreeSlot(int slot) {
+		SavedRecipeTree.LoadResult result = BoM.loadSavedTree(slot);
+		if (result.loaded) {
+			applyLoadedTree(result.missingData);
+		}
+	}
+
+	private int countSnapshotOffsets(SavedRecipeTree.NodeState state) {
+		int count = 0;
+		if (state != null) {
+			if (state.offsetX != 0 || state.offsetY != 0) {
+				count++;
+			}
+			for (SavedRecipeTree.NodeState child : state.children) {
+				count += countSnapshotOffsets(child);
+			}
+		}
+		return count;
+	}
+
+	private String getSavedTreeSummary(SavedRecipeTree saved) {
+		if (saved.isEmpty() || saved.snapshot == null) {
+			return "Save current tree here";
+		}
+		List<String> parts = Lists.newArrayList();
+		parts.add("x" + saved.snapshot.batches);
+		int moved = countSnapshotOffsets(saved.snapshot.root);
+		if (moved > 0) {
+			parts.add(moved + " moved");
+		}
+		if (saved.snapshot.craftingMode) {
+			parts.add("craft mode");
+		}
+		if (saved.hasMissingData()) {
+			parts.add("missing data");
+		}
+		return String.join("  |  ", parts);
 	}
 
 	private Bounds getProjectPanelBounds() {
@@ -707,14 +749,16 @@ public class BoMScreen extends Screen {
 
 	private LibraryRowButtons getProjectRowButtons(Bounds row) {
 		int right = row.x() + row.width() - 10;
-		Bounds override = getProjectButtonBounds(row, right, "Override");
-		right = override.x() - 6;
+		Bounds replace = getProjectButtonBounds(row, right, "Replace");
+		right = replace.x() - 6;
 		Bounds delete = getProjectButtonBounds(row, right, "Delete");
 		right = delete.x() - 6;
 		Bounds rename = getProjectButtonBounds(row, right, "Rename");
 		right = rename.x() - 6;
 		Bounds save = getProjectButtonBounds(row, right, "Save");
-		return new LibraryRowButtons(save, rename, delete, override);
+		right = save.x() - 6;
+		Bounds load = getProjectButtonBounds(row, right, "Load");
+		return new LibraryRowButtons(load, save, rename, delete, replace);
 	}
 
 	private void updateProjectRenameField() {
@@ -758,6 +802,59 @@ public class BoMScreen extends Screen {
 			return name;
 		}
 		return "Project";
+	}
+
+	private String getProjectSummary(PureRefProject project, boolean worldProject) {
+		if (worldProject) {
+			return "Current world board  |  autosaved";
+		}
+		if (project.isEmpty()) {
+			return "Save current board here";
+		}
+		int trees = 0;
+		int notes = 0;
+		int checklists = 0;
+		int shapes = 0;
+		for (PureRefProject.Object object : project.objects) {
+			if (object instanceof PureRefProject.TreeObject) {
+				trees++;
+			} else if (object instanceof PureRefProject.NoteObject) {
+				notes++;
+			} else if (object instanceof PureRefProject.CheckListObject) {
+				checklists++;
+			} else if (object instanceof PureRefProject.ShapeObject) {
+				shapes++;
+			}
+		}
+		List<String> parts = Lists.newArrayList();
+		if (trees > 0) {
+			parts.add(trees + (trees == 1 ? " tree" : " trees"));
+		}
+		if (checklists > 0) {
+			parts.add(checklists + (checklists == 1 ? " checklist" : " checklists"));
+		}
+		if (notes > 0) {
+			parts.add(notes + (notes == 1 ? " note" : " notes"));
+		}
+		if (shapes > 0) {
+			parts.add(shapes + (shapes == 1 ? " shape" : " shapes"));
+		}
+		return parts.isEmpty() ? "Empty project" : String.join("  |  ", parts);
+	}
+
+	private void loadProjectSlot(int slot) {
+		if (slot == 0) {
+			offX = project().offX;
+			offY = project().offY;
+			zoom = project().zoom;
+			return;
+		}
+		if (BoM.loadSavedPureRefProject(slot)) {
+			offX = BoM.pureRefProject.offX;
+			offY = BoM.pureRefProject.offY;
+			zoom = BoM.pureRefProject.zoom;
+			markBoardDirty();
+		}
 	}
 
 	private void saveProjectToSlot(int slot, boolean override) {
@@ -820,14 +917,14 @@ public class BoMScreen extends Screen {
 				: project.isEmpty() ? (slot + 1) + ". Empty Project" : (slot + 1) + ". " + (project.name == null || project.name.isBlank() ? "Project" : project.name);
 			context.drawTextWithShadow(trimLibraryText(title, row.width() - 160, project.isEmpty() ? Formatting.DARK_GRAY : Formatting.WHITE),
 				row.x() + 10, row.y() + 8, -1);
-			String summary = slot == 0 ? "World-local autosaved board"
-				: project.isEmpty() ? "Save current board here" : project.objects.size() + " objects";
+			String summary = getProjectSummary(project, slot == 0);
 			context.drawTextWithShadow(trimLibraryText(summary, row.width() - 160, Formatting.DARK_GRAY), row.x() + 10, row.y() + 22, -1);
 			LibraryRowButtons buttons = getProjectRowButtons(row);
+			renderLibraryAction(context, buttons.load, "Load", slot == 0 || !project.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.save, "Save", true, mouseX, mouseY);
 			renderLibraryAction(context, buttons.rename, "Rename", slot == 0 || !project.isEmpty(), mouseX, mouseY);
 			renderLibraryAction(context, buttons.delete, "Delete", slot != 0 && !project.isEmpty(), mouseX, mouseY);
-			renderLibraryAction(context, buttons.override, "Override", true, mouseX, mouseY);
+			renderLibraryAction(context, buttons.replace, "Replace", true, mouseX, mouseY);
 		}
 		RenderSystem.enableDepthTest();
 		context.pop();
@@ -858,6 +955,11 @@ public class BoMScreen extends Screen {
 				continue;
 			}
 			LibraryRowButtons buttons = getProjectRowButtons(row);
+			if (buttons.load.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
+				selectedProjectSlot = slot;
+				loadProjectSlot(slot);
+				return true;
+			}
 			if (buttons.save.contains((int) mouseX, (int) mouseY)) {
 				saveProjectToSlot(slot, false);
 				return true;
@@ -873,23 +975,14 @@ public class BoMScreen extends Screen {
 				selectedProjectSlot = Math.min(slot, BoM.PURE_REF_SLOT_COUNT - 1);
 				return true;
 			}
-			if (buttons.override.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
+			if (buttons.replace.contains((int) mouseX, (int) mouseY) && (slot == 0 || !project.isEmpty())) {
 				saveProjectToSlot(slot, true);
 				return true;
 			}
 			long now = System.currentTimeMillis();
 			selectedProjectSlot = slot;
 			if ((slot == 0 || !project.isEmpty()) && lastLibraryClickSlot == slot && now - lastLibraryClickTime < 250) {
-				if (slot == 0) {
-					offX = project().offX;
-					offY = project().offY;
-					zoom = project().zoom;
-				} else if (BoM.loadSavedPureRefProject(slot)) {
-					offX = BoM.pureRefProject.offX;
-					offY = BoM.pureRefProject.offY;
-					zoom = BoM.pureRefProject.zoom;
-					markBoardDirty();
-				}
+				loadProjectSlot(slot);
 			}
 			lastLibraryClickSlot = slot;
 			lastLibraryClickTime = now;
@@ -1004,6 +1097,11 @@ public class BoMScreen extends Screen {
 				continue;
 			}
 			LibraryRowButtons buttons = getLibraryRowButtons(row);
+			if (buttons.load.contains((int) mouseX, (int) mouseY) && !saved.isEmpty()) {
+				selectedLibrarySlot = slot;
+				loadTreeSlot(slot);
+				return true;
+			}
 			if (buttons.save.contains((int) mouseX, (int) mouseY) && canSaveToSlot(saved)) {
 				saveTreeToSlot(slot, false);
 				selectedLibrarySlot = slot;
@@ -1022,7 +1120,7 @@ public class BoMScreen extends Screen {
 				updateRenameField();
 				return true;
 			}
-			if (buttons.override.contains((int) mouseX, (int) mouseY) && canOverrideSlot(saved)) {
+			if (buttons.replace.contains((int) mouseX, (int) mouseY) && canOverrideSlot(saved)) {
 				saveTreeToSlot(slot, true);
 				selectedLibrarySlot = slot;
 				return true;
@@ -1030,10 +1128,7 @@ public class BoMScreen extends Screen {
 			long now = System.currentTimeMillis();
 			selectedLibrarySlot = slot;
 			if (!saved.isEmpty() && lastLibraryClickSlot == slot && now - lastLibraryClickTime < 250) {
-				SavedRecipeTree.LoadResult result = BoM.loadSavedTree(slot);
-				if (result.loaded) {
-					applyLoadedTree(result.missingData);
-				}
+				loadTreeSlot(slot);
 			}
 			lastLibraryClickSlot = slot;
 			lastLibraryClickTime = now;
@@ -1440,7 +1535,7 @@ public class BoMScreen extends Screen {
 	private record NodePosition(int x, int y, String structureKey) {
 	}
 
-	private record LibraryRowButtons(Bounds save, Bounds rename, Bounds delete, Bounds override) {
+	private record LibraryRowButtons(Bounds load, Bounds save, Bounds rename, Bounds delete, Bounds replace) {
 	}
 
 	private enum ContextAction {
