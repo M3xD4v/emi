@@ -90,6 +90,7 @@ public class BoMScreen extends Screen {
 	private List<Cost> costs = Lists.newArrayList();
 	private ButtonWidget modeToggleButton;
 	private ButtonWidget libraryButton;
+	private ButtonWidget compareModeButton;
 	private ButtonWidget sendToBoardButton;
 	private ButtonWidget checklistFromTreeButton;
 	private ButtonWidget projectButton;
@@ -163,6 +164,7 @@ public class BoMScreen extends Screen {
 	private int boardContextMenuX = 0;
 	private int boardContextMenuY = 0;
 	private String lastSelectedBoardTreeId = null;
+	private CompareRankMode compareRankMode = CompareRankMode.CHEAPEST_INPUTS;
 	private ShapeHandle activeShapeHandle = ShapeHandle.NONE;
 	private PureRefProject.TreeObject focusedPureRefTree = null;
 	private MaterialTree previousFocusedTree = null;
@@ -207,6 +209,14 @@ public class BoMScreen extends Screen {
 			updateRenameField();
 		});
 		this.addDrawableChild(libraryButton);
+		compareModeButton = EmiPort.newButton(width - 224, 8, 108, 20, EmiPort.literal(compareRankMode.label), button -> {
+			compareRankMode = compareRankMode.next();
+			if (BoM.tree != null) {
+				rebuildOpenComparisons();
+			}
+			syncTopButtons();
+		});
+		this.addDrawableChild(compareModeButton);
 		sendToBoardButton = EmiPort.newButton(width - 336, 8, 108, 20, EmiPort.literal("Send To Board"), button -> {
 			sendCurrentTreeToBoard();
 		});
@@ -350,6 +360,12 @@ public class BoMScreen extends Screen {
 			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
 			libraryButton.visible = visible;
 			libraryButton.active = visible;
+		}
+		if (compareModeButton != null) {
+			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
+			compareModeButton.visible = visible;
+			compareModeButton.active = visible && BoM.tree != null;
+			compareModeButton.setMessage(EmiPort.literal(compareRankMode.label));
 		}
 		if (sendToBoardButton != null) {
 			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
@@ -1620,6 +1636,25 @@ public class BoMScreen extends Screen {
 		PURE_REF
 	}
 
+	private enum CompareRankMode {
+		CHEAPEST_INPUTS("Compare: Cost", "Ranked by total cost"),
+		FEWEST_STEPS("Compare: Steps", "Ranked by fewest steps"),
+		INVENTORY_FRIENDLY("Compare: Inputs", "Ranked by fewest input types"),
+		LOWEST_MISSING("Compare: Missing", "Ranked by lowest missing data");
+
+		private final String label;
+		private final String detailLabel;
+
+		CompareRankMode(String label, String detailLabel) {
+			this.label = label;
+			this.detailLabel = detailLabel;
+		}
+
+		private CompareRankMode next() {
+			return values()[(ordinal() + 1) % values().length];
+		}
+	}
+
 	private enum PureRefTool {
 		SELECT("Select"),
 		NOTE("Note"),
@@ -1686,9 +1721,11 @@ public class BoMScreen extends Screen {
 					volume.nodes.get(0).comparisonCost = comparison.estimatedCost;
 					volume.nodes.get(0).comparisonSteps = comparison.estimatedSteps;
 					volume.nodes.get(0).comparisonMissingInputs = comparison.missingInputs;
+					volume.nodes.get(0).comparisonInputTypes = comparison.estimatedInputTypes;
 					volume.nodes.get(0).comparisonSelected = comparison.selected;
 					volume.nodes.get(0).comparisonCheapest = comparison.cheapest;
 					volume.nodes.get(0).comparisonFastest = comparison.fastest;
+					volume.nodes.get(0).comparisonPreferred = comparison.preferredForMode;
 					volume.nodes.get(0).comparisonRank = i + 1;
 				}
 				comparisonVolumes.add(volume);
@@ -1699,7 +1736,7 @@ public class BoMScreen extends Screen {
 				if (!combined.nodes.isEmpty()) {
 					combined.nodes.get(0).comparisonHead = true;
 					combined.nodes.get(0).comparisonOptions = node.comparisons.size();
-					combined.nodes.get(0).comparisonRankLabel = "Ranked by total cost";
+					combined.nodes.get(0).comparisonRankLabel = compareRankMode.detailLabel;
 				}
 				return combined;
 			}
@@ -2117,6 +2154,11 @@ public class BoMScreen extends Screen {
 			.toList();
 	}
 
+	private MaterialNode getNodeByPath(String path) {
+		Node node = nodes.stream().filter(n -> n.path.equals(path)).findFirst().orElse(null);
+		return node == null ? null : node.node;
+	}
+
 	private void centerOnNode(String path) {
 		Node node = nodes.stream().filter(n -> n.path.equals(path)).findFirst().orElse(null);
 		if (node == null) {
@@ -2208,7 +2250,7 @@ public class BoMScreen extends Screen {
 			return "Tree menu open  |  LMB action  |  Click outside to close";
 		}
 		if (hover != null && hover.renderNode != null && hover.renderNode.comparisonCandidate) {
-			return "Compare candidate  |  LMB select recipe  |  RMB node menu";
+			return "Compare candidate  |  " + compareRankMode.label + "  |  LMB select recipe  |  RMB node menu";
 		}
 		if (hover != null && hover.node != null) {
 			boolean moved = hover.renderNode != null && hasManualOffset(hover.renderNode.path);
@@ -2222,7 +2264,7 @@ public class BoMScreen extends Screen {
 		if (BoM.tree != null && mode.contains(mx, my)) {
 			return "Mode toggle  |  Switch between view and craft progress";
 		}
-		return "Canvas  |  MMB drag pan  |  RMB node menu  |  Use menu for center, fit, reset, compare";
+		return "Canvas  |  MMB drag pan  |  Compare mode: " + compareRankMode.label + "  |  RMB node menu";
 	}
 
 	private void moveInlineNoteCursorToPreviousWord() {
@@ -2374,24 +2416,73 @@ public class BoMScreen extends Screen {
 				long estimatedCost = BoM.tree.estimateCost(comparisonNode);
 				int estimatedSteps = BoM.tree.estimateSteps(comparisonNode);
 				int missingInputs = BoM.tree.countMissingNodes(comparisonNode);
+				int estimatedInputTypes = BoM.tree.estimateInputTypes(comparisonNode);
 				boolean isSelected = selected != null && selected.equals(r);
-				return new MaterialNode.Comparison(r, comparisonNode, estimatedCost, estimatedSteps, missingInputs, isSelected);
+				return new MaterialNode.Comparison(r, comparisonNode, estimatedCost, estimatedSteps, missingInputs, estimatedInputTypes, isSelected);
 			})
-			.sorted(Comparator
-				.comparingLong((MaterialNode.Comparison c) -> c.estimatedCost)
-				.thenComparingInt(c -> c.estimatedSteps)
-				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory())))
+			.sorted(getComparisonComparator())
 			.collect(Collectors.toList());
 		long cheapestCost = node.comparisons.stream().mapToLong(c -> c.estimatedCost).min().orElse(Long.MAX_VALUE);
 		int fastestSteps = node.comparisons.stream().mapToInt(c -> c.estimatedSteps).min().orElse(Integer.MAX_VALUE);
+		int fewestInputs = node.comparisons.stream().mapToInt(c -> c.estimatedInputTypes).min().orElse(Integer.MAX_VALUE);
+		int lowestMissing = node.comparisons.stream().mapToInt(c -> c.missingInputs).min().orElse(Integer.MAX_VALUE);
 		for (MaterialNode.Comparison comparison : node.comparisons) {
 			comparison.cheapest = comparison.estimatedCost == cheapestCost;
 			comparison.fastest = comparison.estimatedSteps == fastestSteps;
+			comparison.preferredForMode = switch (compareRankMode) {
+				case CHEAPEST_INPUTS -> comparison.estimatedCost == cheapestCost;
+				case FEWEST_STEPS -> comparison.estimatedSteps == fastestSteps;
+				case INVENTORY_FRIENDLY -> comparison.estimatedInputTypes == fewestInputs;
+				case LOWEST_MISSING -> comparison.missingInputs == lowestMissing;
+			};
 		}
 		if (node.comparisons.stream().noneMatch(c -> c.selected) && !node.comparisons.isEmpty()) {
 			node.comparisons.get(0).selected = true;
 		}
 		return true;
+	}
+
+	private Comparator<MaterialNode.Comparison> getComparisonComparator() {
+		return switch (compareRankMode) {
+			case CHEAPEST_INPUTS -> Comparator
+				.comparingLong((MaterialNode.Comparison c) -> c.estimatedCost)
+				.thenComparingInt(c -> c.estimatedSteps)
+				.thenComparingInt(c -> c.estimatedInputTypes)
+				.thenComparingInt(c -> c.missingInputs)
+				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory()));
+			case FEWEST_STEPS -> Comparator
+				.comparingInt((MaterialNode.Comparison c) -> c.estimatedSteps)
+				.thenComparingLong(c -> c.estimatedCost)
+				.thenComparingInt(c -> c.estimatedInputTypes)
+				.thenComparingInt(c -> c.missingInputs)
+				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory()));
+			case INVENTORY_FRIENDLY -> Comparator
+				.comparingInt((MaterialNode.Comparison c) -> c.estimatedInputTypes)
+				.thenComparingLong(c -> c.estimatedCost)
+				.thenComparingInt(c -> c.estimatedSteps)
+				.thenComparingInt(c -> c.missingInputs)
+				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory()));
+			case LOWEST_MISSING -> Comparator
+				.comparingInt((MaterialNode.Comparison c) -> c.missingInputs)
+				.thenComparingLong(c -> c.estimatedCost)
+				.thenComparingInt(c -> c.estimatedSteps)
+				.thenComparingInt(c -> c.estimatedInputTypes)
+				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory()));
+		};
+	}
+
+	private void rebuildOpenComparisons() {
+		if (BoM.tree == null) {
+			return;
+		}
+		Set<String> openComparisons = captureOpenComparisonPaths(null);
+		for (String path : openComparisons.stream().sorted(Comparator.comparingInt(String::length)).toList()) {
+			MaterialNode node = getNodeByPath(path);
+			if (node != null && !node.hasComparisons()) {
+				toggleComparison(node);
+			}
+		}
+		recalculateTree();
 	}
 
 	private boolean selectComparison(MaterialNode compareOwner, EmiRecipe recipe) {
@@ -4412,6 +4503,8 @@ public class BoMScreen extends Screen {
 						+ "  |  Cost " + renderNode.comparisonCost
 						+ "  |  " + renderNode.comparisonSteps + (renderNode.comparisonSteps == 1 ? " step" : " steps"),
 						Formatting.GRAY)));
+					list.add(EmiTooltipComponents.of(EmiPort.literal("Mode: " + compareRankMode.label
+						+ "  |  Inputs " + renderNode.comparisonInputTypes, Formatting.DARK_GRAY)));
 					if (renderNode.comparisonMissingInputs > 0) {
 						list.add(EmiTooltipComponents.of(EmiPort.literal(renderNode.comparisonMissingInputs
 							+ (renderNode.comparisonMissingInputs == 1 ? " missing node" : " missing nodes"), Formatting.RED)));
@@ -4454,9 +4547,11 @@ public class BoMScreen extends Screen {
 		public boolean comparisonSelected = false;
 		public boolean comparisonCheapest = false;
 		public boolean comparisonFastest = false;
+		public boolean comparisonPreferred = false;
 		public long comparisonCost = 0;
 		public int comparisonSteps = 0;
 		public int comparisonMissingInputs = 0;
+		public int comparisonInputTypes = 0;
 		public int comparisonRank = 0;
 		public int comparisonOptions = 0;
 		public String comparisonRankLabel = "";
@@ -4554,6 +4649,10 @@ public class BoMScreen extends Screen {
 					int pillY = y - 24;
 					renderComparePill(context, "#" + comparisonRank, pillX, pillY, 0xD019232D, 0xFFD5E4F3);
 					pillX += textRenderer.getWidth("#" + comparisonRank) + 10;
+					if (comparisonPreferred) {
+						renderComparePill(context, "Best", pillX, pillY, 0xE0355D2D, 0xFFE4F8E0);
+						pillX += textRenderer.getWidth("Best") + 10;
+					}
 					if (comparisonSelected) {
 						renderComparePill(context, "Current", pillX, pillY, 0xE0A37C19, 0xFFFFF5D0);
 						pillX += textRenderer.getWidth("Current") + 10;
@@ -4569,7 +4668,12 @@ public class BoMScreen extends Screen {
 					if (comparisonMissingInputs > 0) {
 						renderComparePill(context, "Missing", pillX, pillY, 0xE0652828, 0xFFFFE3E3);
 					}
-					String detail = comparisonSteps <= 1 ? "1 step" : comparisonSteps + " steps";
+					String detail = switch (compareRankMode) {
+						case CHEAPEST_INPUTS -> comparisonSteps <= 1 ? "1 step" : comparisonSteps + " steps";
+						case FEWEST_STEPS -> comparisonSteps <= 1 ? "1 step" : comparisonSteps + " steps";
+						case INVENTORY_FRIENDLY -> comparisonInputTypes == 1 ? "1 input type" : comparisonInputTypes + " input types";
+						case LOWEST_MISSING -> comparisonMissingInputs == 1 ? "1 missing node" : comparisonMissingInputs + " missing nodes";
+					};
 					int detailWidth = textRenderer.getWidth(detail) + 6;
 					int detailX = x - detailWidth / 2;
 					context.fill(detailX, y + 12, detailWidth, 9, 0xC0151B24);

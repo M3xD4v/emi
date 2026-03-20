@@ -89,6 +89,12 @@ public class MaterialTree {
 		return countMissingNodes(node, Sets.newIdentityHashSet());
 	}
 
+	public int estimateInputTypes(MaterialNode node) {
+		TreeCost cost = new TreeCost();
+		cost.calculate(node, batches);
+		return cost.costs.size() + cost.chanceCosts.size();
+	}
+
 	private int estimateSteps(MaterialNode node, Set<MaterialNode> visited) {
 		if (node == null || !visited.add(node)) {
 			return 0;
