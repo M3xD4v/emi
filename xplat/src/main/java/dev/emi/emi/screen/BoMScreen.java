@@ -90,6 +90,8 @@ public class BoMScreen extends Screen {
 	private List<Cost> costs = Lists.newArrayList();
 	private ButtonWidget modeToggleButton;
 	private ButtonWidget libraryButton;
+	private ButtonWidget sendToBoardButton;
+	private ButtonWidget checklistFromTreeButton;
 	private ButtonWidget projectButton;
 	private ButtonWidget insertButton;
 	private ButtonWidget backToBoardButton;
@@ -184,21 +186,9 @@ public class BoMScreen extends Screen {
 				exitPureRefTreeFocus(true);
 			}
 			if (viewMode == ViewMode.TREE) {
-				storedTreeOffX = offX;
-				storedTreeOffY = offY;
-				storedTreeZoom = zoom;
-				viewMode = ViewMode.PURE_REF;
-				offX = BoM.pureRefProject.offX;
-				offY = BoM.pureRefProject.offY;
-				zoom = BoM.pureRefProject.zoom;
+				switchToBoardView();
 			} else {
-				BoM.pureRefProject.offX = offX;
-				BoM.pureRefProject.offY = offY;
-				BoM.pureRefProject.zoom = zoom;
-				viewMode = ViewMode.TREE;
-				offX = storedTreeOffX;
-				offY = storedTreeOffY;
-				zoom = storedTreeZoom;
+				switchToTreeView();
 			}
 			closeContextMenu();
 			projectLibraryOpen = false;
@@ -217,6 +207,14 @@ public class BoMScreen extends Screen {
 			updateRenameField();
 		});
 		this.addDrawableChild(libraryButton);
+		sendToBoardButton = EmiPort.newButton(width - 336, 8, 108, 20, EmiPort.literal("Send To Board"), button -> {
+			sendCurrentTreeToBoard();
+		});
+		this.addDrawableChild(sendToBoardButton);
+		checklistFromTreeButton = EmiPort.newButton(width - 448, 8, 106, 20, EmiPort.literal("Make Checklist"), button -> {
+			createChecklistFromCurrentTree();
+		});
+		this.addDrawableChild(checklistFromTreeButton);
 		projectButton = EmiPort.newButton(width - 214, 8, 96, 20, EmiPort.literal("Projects"), button -> {
 			projectLibraryOpen = !projectLibraryOpen;
 			libraryOpen = false;
@@ -312,6 +310,32 @@ public class BoMScreen extends Screen {
 		recalculateTree(null);
 	}
 
+	private void switchToBoardView() {
+		if (viewMode == ViewMode.PURE_REF) {
+			return;
+		}
+		storedTreeOffX = offX;
+		storedTreeOffY = offY;
+		storedTreeZoom = zoom;
+		viewMode = ViewMode.PURE_REF;
+		offX = BoM.pureRefProject.offX;
+		offY = BoM.pureRefProject.offY;
+		zoom = BoM.pureRefProject.zoom;
+	}
+
+	private void switchToTreeView() {
+		if (viewMode == ViewMode.TREE) {
+			return;
+		}
+		BoM.pureRefProject.offX = offX;
+		BoM.pureRefProject.offY = offY;
+		BoM.pureRefProject.zoom = zoom;
+		viewMode = ViewMode.TREE;
+		offX = storedTreeOffX;
+		offY = storedTreeOffY;
+		zoom = storedTreeZoom;
+	}
+
 	private boolean isTreeViewportActive() {
 		return viewMode == ViewMode.TREE || focusedPureRefTree != null;
 	}
@@ -326,6 +350,16 @@ public class BoMScreen extends Screen {
 			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
 			libraryButton.visible = visible;
 			libraryButton.active = visible;
+		}
+		if (sendToBoardButton != null) {
+			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
+			sendToBoardButton.visible = visible;
+			sendToBoardButton.active = visible && createSnapshot() != null;
+		}
+		if (checklistFromTreeButton != null) {
+			boolean visible = viewMode == ViewMode.TREE && focusedPureRefTree == null;
+			checklistFromTreeButton.visible = visible;
+			checklistFromTreeButton.active = visible && createSnapshot() != null;
 		}
 		if (projectButton != null) {
 			boolean visible = viewMode == ViewMode.PURE_REF && focusedPureRefTree == null;
@@ -3603,6 +3637,85 @@ public class BoMScreen extends Screen {
 
 	private PureRefProject project() {
 		return BoM.pureRefProject;
+	}
+
+	private int getBoardViewportCenterX() {
+		return (int) Math.round(-BoM.pureRefProject.offX);
+	}
+
+	private int getBoardViewportCenterY() {
+		return (int) Math.round(-BoM.pureRefProject.offY);
+	}
+
+	private PureRefProject.TreeObject createBoardTreeObjectFromCurrentTree(int x, int y) {
+		SavedRecipeTree.RecipeTreeSnapshot snapshot = createSnapshot();
+		if (snapshot == null || BoM.tree == null || BoM.tree.goal == null) {
+			return null;
+		}
+		EmiIngredient thumbnail = BoM.tree.goal.ingredient;
+		String title = getDefaultTreeName();
+		PureRefProject.TreeObject tree = new PureRefProject.TreeObject(
+			PureRefProject.nextObjectId(),
+			x,
+			y,
+			340,
+			220,
+			title == null || title.isBlank() ? "Current Tree" : title,
+			thumbnail == null ? EmiStack.EMPTY : thumbnail,
+			snapshot
+		);
+		tree.zIndex = getNextBoardZIndex();
+		return tree;
+	}
+
+	private void sendCurrentTreeToBoard() {
+		PureRefProject.TreeObject tree = createBoardTreeObjectFromCurrentTree(getBoardViewportCenterX() - 170, getBoardViewportCenterY() - 110);
+		if (tree == null) {
+			return;
+		}
+		project().objects.add(tree);
+		selectedPureRefObject = tree;
+		lastSelectedBoardTreeId = tree.id;
+		normalizeBoardZOrder();
+		markBoardDirty();
+		switchToBoardView();
+		projectLibraryOpen = false;
+		insertOverlayOpen = false;
+		libraryOpen = false;
+		syncTopButtons();
+	}
+
+	private void createChecklistFromCurrentTree() {
+		int centerX = getBoardViewportCenterX();
+		int centerY = getBoardViewportCenterY();
+		PureRefProject.TreeObject tree = createBoardTreeObjectFromCurrentTree(centerX - 360, centerY - 110);
+		if (tree == null) {
+			return;
+		}
+		project().objects.add(tree);
+		PureRefProject.CheckListObject checkList = new PureRefProject.CheckListObject(
+			PureRefProject.nextObjectId(),
+			centerX + 10,
+			centerY - 90,
+			280,
+			180,
+			"Checklist",
+			tree.id,
+			false,
+			Lists.newArrayList()
+		);
+		checkList.zIndex = getNextBoardZIndex();
+		project().objects.add(checkList);
+		populateCheckListFromTree(checkList, tree, false);
+		selectedPureRefObject = checkList;
+		lastSelectedBoardTreeId = tree.id;
+		normalizeBoardZOrder();
+		markBoardDirty();
+		switchToBoardView();
+		projectLibraryOpen = false;
+		insertOverlayOpen = false;
+		libraryOpen = false;
+		syncTopButtons();
 	}
 
 	private void markBoardDirty() {
