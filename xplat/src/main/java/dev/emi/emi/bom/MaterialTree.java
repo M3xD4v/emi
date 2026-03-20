@@ -1,9 +1,11 @@
 package dev.emi.emi.bom;
 
+import java.util.Set;
 import java.util.Map;
 import java.util.stream.Stream;
 
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 
 import dev.emi.emi.api.recipe.EmiPlayerInventory;
 import dev.emi.emi.api.recipe.EmiRecipe;
@@ -77,6 +79,43 @@ public class MaterialTree {
 		return Stream.concat(cost.costs.values().stream(), cost.chanceCosts.values().stream())
 			.mapToLong(FlatMaterialCost::getEffectiveAmount)
 			.sum();
+	}
+
+	public int estimateSteps(MaterialNode node) {
+		return estimateSteps(node, Sets.newIdentityHashSet());
+	}
+
+	public int countMissingNodes(MaterialNode node) {
+		return countMissingNodes(node, Sets.newIdentityHashSet());
+	}
+
+	private int estimateSteps(MaterialNode node, Set<MaterialNode> visited) {
+		if (node == null || !visited.add(node)) {
+			return 0;
+		}
+		int steps = node.recipe != null ? 1 : 0;
+		if (node.children == null || node.children.isEmpty() || node.state != FoldState.EXPANDED) {
+			return steps;
+		}
+		int childMax = 0;
+		for (MaterialNode child : node.children) {
+			childMax = Math.max(childMax, estimateSteps(child, visited));
+		}
+		return steps + childMax;
+	}
+
+	private int countMissingNodes(MaterialNode node, Set<MaterialNode> visited) {
+		if (node == null || !visited.add(node)) {
+			return 0;
+		}
+		int total = node.missing ? 1 : 0;
+		if (node.children == null || node.children.isEmpty()) {
+			return total;
+		}
+		for (MaterialNode child : node.children) {
+			total += countMissingNodes(child, visited);
+		}
+		return total;
 	}
 
 	public static record NodeOffset(int x, int y) {

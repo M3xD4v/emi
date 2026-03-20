@@ -139,12 +139,18 @@ public class MaterialNode {
 		public final EmiRecipe recipe;
 		public final MaterialNode node;
 		public final long estimatedCost;
+		public final int estimatedSteps;
+		public final int missingInputs;
 		public boolean selected;
+		public boolean cheapest;
+		public boolean fastest;
 
-		public Comparison(EmiRecipe recipe, MaterialNode node, long estimatedCost, boolean selected) {
+		public Comparison(EmiRecipe recipe, MaterialNode node, long estimatedCost, int estimatedSteps, int missingInputs, boolean selected) {
 			this.recipe = recipe;
 			this.node = node;
 			this.estimatedCost = estimatedCost;
+			this.estimatedSteps = estimatedSteps;
+			this.missingInputs = missingInputs;
 			this.selected = selected;
 		}
 	}

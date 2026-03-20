@@ -1527,7 +1527,12 @@ public class BoMScreen extends Screen {
 					volume.nodes.get(0).comparisonCandidate = true;
 					volume.nodes.get(0).compareOwner = node;
 					volume.nodes.get(0).comparisonCost = comparison.estimatedCost;
+					volume.nodes.get(0).comparisonSteps = comparison.estimatedSteps;
+					volume.nodes.get(0).comparisonMissingInputs = comparison.missingInputs;
 					volume.nodes.get(0).comparisonSelected = comparison.selected;
+					volume.nodes.get(0).comparisonCheapest = comparison.cheapest;
+					volume.nodes.get(0).comparisonFastest = comparison.fastest;
+					volume.nodes.get(0).comparisonRank = i + 1;
 				}
 				comparisonVolumes.add(volume);
 			}
@@ -1536,6 +1541,8 @@ public class BoMScreen extends Screen {
 				combined.addHead(node, multiplier, depth * NODE_VERTICAL_SPACING, chance, path, outlineColor);
 				if (!combined.nodes.isEmpty()) {
 					combined.nodes.get(0).comparisonHead = true;
+					combined.nodes.get(0).comparisonOptions = node.comparisons.size();
+					combined.nodes.get(0).comparisonRankLabel = "Ranked by total cost";
 				}
 				return combined;
 			}
@@ -2222,13 +2229,22 @@ public class BoMScreen extends Screen {
 			.map(r -> {
 				MaterialNode comparisonNode = BoM.tree.createComparisonNode(node, r);
 				long estimatedCost = BoM.tree.estimateCost(comparisonNode);
+				int estimatedSteps = BoM.tree.estimateSteps(comparisonNode);
+				int missingInputs = BoM.tree.countMissingNodes(comparisonNode);
 				boolean isSelected = selected != null && selected.equals(r);
-				return new MaterialNode.Comparison(r, comparisonNode, estimatedCost, isSelected);
+				return new MaterialNode.Comparison(r, comparisonNode, estimatedCost, estimatedSteps, missingInputs, isSelected);
 			})
 			.sorted(Comparator
 				.comparingLong((MaterialNode.Comparison c) -> c.estimatedCost)
+				.thenComparingInt(c -> c.estimatedSteps)
 				.thenComparingInt(c -> EmiRecipeCategoryProperties.getOrder(c.recipe.getCategory())))
 			.collect(Collectors.toList());
+		long cheapestCost = node.comparisons.stream().mapToLong(c -> c.estimatedCost).min().orElse(Long.MAX_VALUE);
+		int fastestSteps = node.comparisons.stream().mapToInt(c -> c.estimatedSteps).min().orElse(Integer.MAX_VALUE);
+		for (MaterialNode.Comparison comparison : node.comparisons) {
+			comparison.cheapest = comparison.estimatedCost == cheapestCost;
+			comparison.fastest = comparison.estimatedSteps == fastestSteps;
+		}
 		if (node.comparisons.stream().noneMatch(c -> c.selected) && !node.comparisons.isEmpty()) {
 			node.comparisons.get(0).selected = true;
 		}
@@ -2921,6 +2937,12 @@ public class BoMScreen extends Screen {
 	private void renderNodeBadge(EmiDrawContext context, int x, int y, int color) {
 		context.fill(x, y, 5, 5, 0xFF11161D);
 		context.fill(x + 1, y + 1, 3, 3, color);
+	}
+
+	private void renderComparePill(EmiDrawContext context, String text, int x, int y, int bgColor, int textColor) {
+		int width = textRenderer.getWidth(text) + 6;
+		context.fill(x, y, width, 9, bgColor);
+		context.drawTextWithShadow(EmiPort.literal(text), x + 3, y + 1, textColor);
 	}
 
 	private boolean handleBoardContextMenuClick(int mouseX, int mouseY, int button) {
@@ -4030,6 +4052,14 @@ public class BoMScreen extends Screen {
 				}
 				if (renderNode != null && renderNode.comparisonCandidate) {
 					list.add(EmiTooltipComponents.of(EmiPort.literal("Left click to select this recipe path", Formatting.AQUA)));
+					list.add(EmiTooltipComponents.of(EmiPort.literal("Rank #" + renderNode.comparisonRank
+						+ "  |  Cost " + renderNode.comparisonCost
+						+ "  |  " + renderNode.comparisonSteps + (renderNode.comparisonSteps == 1 ? " step" : " steps"),
+						Formatting.GRAY)));
+					if (renderNode.comparisonMissingInputs > 0) {
+						list.add(EmiTooltipComponents.of(EmiPort.literal(renderNode.comparisonMissingInputs
+							+ (renderNode.comparisonMissingInputs == 1 ? " missing node" : " missing nodes"), Formatting.RED)));
+					}
 				} else if (node != null) {
 					list.add(EmiTooltipComponents.of(EmiPort.literal("Right click for node menu", Formatting.DARK_GRAY)));
 				}
@@ -4066,7 +4096,14 @@ public class BoMScreen extends Screen {
 		public boolean comparisonHead = false;
 		public boolean comparisonCandidate = false;
 		public boolean comparisonSelected = false;
+		public boolean comparisonCheapest = false;
+		public boolean comparisonFastest = false;
 		public long comparisonCost = 0;
+		public int comparisonSteps = 0;
+		public int comparisonMissingInputs = 0;
+		public int comparisonRank = 0;
+		public int comparisonOptions = 0;
+		public String comparisonRankLabel = "";
 		public MaterialNode compareOwner = null;
 
 		public Node(MaterialNode node, long amount, int x, int y, ChanceState chance, String path, int outlineColor) {
@@ -4090,6 +4127,21 @@ public class BoMScreen extends Screen {
 		}
 
 		public void render(EmiDrawContext context, int mouseX, int mouseY, float delta) {
+			if (comparisonHead && comparisonOptions > 0) {
+				String title = comparisonOptions == 1 ? "1 Alternative" : comparisonOptions + " Alternatives";
+				int titleWidth = textRenderer.getWidth(title) + 10;
+				int titleX = x - titleWidth / 2;
+				int titleY = y - 30;
+				context.fill(titleX, titleY, titleWidth, 10, 0xE0233442);
+				context.fill(titleX, titleY, titleWidth, 1, 0xFF7BA7D0);
+				context.drawTextWithShadow(EmiPort.literal(title, Formatting.WHITE), titleX + 5, titleY + 1, -1);
+				if (!comparisonRankLabel.isEmpty()) {
+					int rankWidth = textRenderer.getWidth(comparisonRankLabel) + 8;
+					int rankX = x - rankWidth / 2;
+					context.fill(rankX, titleY - 10, rankWidth, 9, 0xD019232D);
+					context.drawTextWithShadow(EmiPort.literal(comparisonRankLabel, Formatting.GRAY), rankX + 4, titleY - 9, -1);
+				}
+			}
 			if (parent != null) {
 				context.push();
 
@@ -4142,6 +4194,30 @@ public class BoMScreen extends Screen {
 				context.pop();
 				if (comparisonCandidate) {
 					MicroTextRenderer.render(context, comparisonCost, false, 18, x + width / 2 - 1, y - 12, comparisonSelected ? 0xFFF0D46A : 0xFFB5C6D8);
+					int pillX = x - width / 2;
+					int pillY = y - 24;
+					renderComparePill(context, "#" + comparisonRank, pillX, pillY, 0xD019232D, 0xFFD5E4F3);
+					pillX += textRenderer.getWidth("#" + comparisonRank) + 10;
+					if (comparisonSelected) {
+						renderComparePill(context, "Current", pillX, pillY, 0xE0A37C19, 0xFFFFF5D0);
+						pillX += textRenderer.getWidth("Current") + 10;
+					}
+					if (comparisonCheapest) {
+						renderComparePill(context, "Cheapest", pillX, pillY, 0xE0245943, 0xFFDDF8EA);
+						pillX += textRenderer.getWidth("Cheapest") + 10;
+					}
+					if (comparisonFastest) {
+						renderComparePill(context, "Fastest", pillX, pillY, 0xE0244260, 0xFFDDEFFF);
+						pillX += textRenderer.getWidth("Fastest") + 10;
+					}
+					if (comparisonMissingInputs > 0) {
+						renderComparePill(context, "Missing", pillX, pillY, 0xE0652828, 0xFFFFE3E3);
+					}
+					String detail = comparisonSteps <= 1 ? "1 step" : comparisonSteps + " steps";
+					int detailWidth = textRenderer.getWidth(detail) + 6;
+					int detailX = x - detailWidth / 2;
+					context.fill(detailX, y + 12, detailWidth, 9, 0xC0151B24);
+					context.drawTextWithShadow(EmiPort.literal(detail, Formatting.GRAY), detailX + 3, y + 13, -1);
 				}
 			}
 			context.setColor(1f, 1f, 1f, 1f);
