@@ -88,11 +88,15 @@ public class PureRefProject {
 		public final String id;
 		public int x;
 		public int y;
+		public int zIndex;
+		public boolean locked;
 
 		public Object(String id, int x, int y) {
 			this.id = id;
 			this.x = x;
 			this.y = y;
+			this.zIndex = 0;
+			this.locked = false;
 		}
 
 		public abstract Type getType();
@@ -107,8 +111,15 @@ public class PureRefProject {
 			json.addProperty("id", id);
 			json.addProperty("x", x);
 			json.addProperty("y", y);
+			json.addProperty("z_index", zIndex);
+			json.addProperty("locked", locked);
 			saveData(json);
 			return json;
+		}
+
+		protected void copyCommonStateTo(Object object) {
+			object.zIndex = zIndex;
+			object.locked = locked;
 		}
 
 		public static @Nullable Object load(JsonObject json) {
@@ -121,12 +132,17 @@ public class PureRefProject {
 			String id = JsonHelper.getString(json, "id", "obj");
 			int x = JsonHelper.getInt(json, "x", 0);
 			int y = JsonHelper.getInt(json, "y", 0);
-			return switch (type) {
+			Object object = switch (type) {
 				case TREE -> TreeObject.load(id, x, y, json);
 				case NOTE -> NoteObject.load(id, x, y, json);
 				case SHAPE -> ShapeObject.load(id, x, y, json);
 				case CHECKLIST -> CheckListObject.load(id, x, y, json);
 			};
+			if (object != null) {
+				object.zIndex = JsonHelper.getInt(json, "z_index", 0);
+				object.locked = JsonHelper.getBoolean(json, "locked", false);
+			}
+			return object;
 		}
 	}
 
@@ -154,7 +170,9 @@ public class PureRefProject {
 
 		@Override
 		public Object copy() {
-			return new TreeObject(id, x, y, width, height, title, thumbnail, snapshot);
+			TreeObject copy = new TreeObject(id, x, y, width, height, title, thumbnail, snapshot);
+			copyCommonStateTo(copy);
+			return copy;
 		}
 
 		public @Nullable SavedRecipeTree.TreeBuildResult buildTree() {
@@ -217,7 +235,9 @@ public class PureRefProject {
 
 		@Override
 		public Object copy() {
-			return new NoteObject(id, x, y, width, height, title, body, color);
+			NoteObject copy = new NoteObject(id, x, y, width, height, title, body, color);
+			copyCommonStateTo(copy);
+			return copy;
 		}
 
 		@Override
@@ -262,7 +282,9 @@ public class PureRefProject {
 
 		@Override
 		public Object copy() {
-			return new ShapeObject(id, x, y, x2, y2, shapeType, color, thickness);
+			ShapeObject copy = new ShapeObject(id, x, y, x2, y2, shapeType, color, thickness);
+			copyCommonStateTo(copy);
+			return copy;
 		}
 
 		@Override
@@ -321,7 +343,9 @@ public class PureRefProject {
 			for (CheckListEntry entry : entries) {
 				copiedEntries.add(entry.copy());
 			}
-			return new CheckListObject(id, x, y, width, height, title, linkedTreeObjectId, autoSync, copiedEntries);
+			CheckListObject copy = new CheckListObject(id, x, y, width, height, title, linkedTreeObjectId, autoSync, copiedEntries);
+			copyCommonStateTo(copy);
+			return copy;
 		}
 
 		@Override

@@ -1458,6 +1458,15 @@ public class BoMScreen extends Screen {
 		UNFOLD
 	}
 
+	private enum BoardContextAction {
+		EDIT,
+		DUPLICATE,
+		DELETE,
+		LOCK_TOGGLE,
+		BRING_FRONT,
+		SEND_BACK
+	}
+
 	private enum ViewMode {
 		TREE,
 		PURE_REF
@@ -1684,25 +1693,11 @@ public class BoMScreen extends Screen {
 				return true;
 			}
 			if (keyCode == GLFW.GLFW_KEY_DELETE && selectedPureRefObject != null) {
-				if (selectedPureRefObject instanceof PureRefProject.NoteObject note) {
-					if (editingNote != null) {
-						commitNoteEditor();
-					}
-					pendingNoteDelete = note;
-				} else {
-					project().objects.remove(selectedPureRefObject);
-					selectedPureRefObject = null;
-					markBoardDirty();
-				}
+				deleteBoardObject(selectedPureRefObject);
 				return true;
 			}
 			if (EmiInput.isControlDown() && keyCode == GLFW.GLFW_KEY_D && selectedPureRefObject != null) {
-				PureRefProject.Object copy = selectedPureRefObject.copy();
-				copy.x += 18;
-				copy.y += 18;
-				project().objects.add(copy);
-				selectedPureRefObject = copy;
-				markBoardDirty();
+				duplicateBoardObject(selectedPureRefObject);
 				return true;
 			}
 			if (keyCode == GLFW.GLFW_KEY_1) {
@@ -2325,6 +2320,7 @@ public class BoMScreen extends Screen {
 			if (button == 0 && pendingTreeInsert != null) {
 				pendingTreeInsert.x = cx - pendingTreeInsert.width / 2;
 				pendingTreeInsert.y = cy - pendingTreeInsert.height / 2;
+				pendingTreeInsert.zIndex = getNextBoardZIndex();
 				project().objects.add(pendingTreeInsert);
 				selectedPureRefObject = pendingTreeInsert;
 				lastSelectedBoardTreeId = pendingTreeInsert.id;
@@ -2356,6 +2352,7 @@ public class BoMScreen extends Screen {
 				pureRefObjectMoved = false;
 				if (pureRefTool == PureRefTool.NOTE) {
 					PureRefProject.NoteObject note = new PureRefProject.NoteObject(PureRefProject.nextObjectId(), cx, cy, 220, 10, "", "New note", 0);
+					note.zIndex = getNextBoardZIndex();
 					project().objects.add(note);
 					selectedPureRefObject = note;
 					markBoardDirty();
@@ -2364,6 +2361,7 @@ public class BoMScreen extends Screen {
 				if (pureRefTool == PureRefTool.CHECKLIST) {
 					PureRefProject.CheckListObject checkList = new PureRefProject.CheckListObject(PureRefProject.nextObjectId(), cx, cy, 260, 160, "Checklist", null, false, Lists.newArrayList());
 					checkList.entries.add(new PureRefProject.CheckListEntry(PureRefProject.nextCheckListEntryId(), "Item", 0, 0, null, null));
+					checkList.zIndex = getNextBoardZIndex();
 					project().objects.add(checkList);
 					selectedPureRefObject = checkList;
 					markBoardDirty();
@@ -2385,17 +2383,17 @@ public class BoMScreen extends Screen {
 					lastSelectedBoardTreeId = tree.id;
 				}
 				if (object instanceof PureRefProject.NoteObject note && isNoteResizeHandle(note, cx, cy)) {
-					pureRefResizingNote = true;
+					pureRefResizingNote = !object.locked;
 				} else if (object instanceof PureRefProject.TreeObject tree && isTreeResizeHandle(tree, cx, cy)) {
-					pureRefResizingTree = true;
+					pureRefResizingTree = !object.locked;
 				} else if (object instanceof PureRefProject.CheckListObject checkList && isCheckListResizeHandle(checkList, cx, cy)) {
-					pureRefResizingCheckList = true;
+					pureRefResizingCheckList = !object.locked;
 				} else if (object instanceof PureRefProject.ShapeObject shape) {
 					editingShape = shape;
 					activeShapeHandle = getShapeHandle(shape, cx, cy);
-					pureRefDraggingObject = activeShapeHandle != ShapeHandle.NONE;
+					pureRefDraggingObject = !object.locked && activeShapeHandle != ShapeHandle.NONE;
 				} else if (object != null) {
-					pureRefDraggingObject = true;
+					pureRefDraggingObject = !object.locked;
 				}
 				pureRefDragLastX = cx;
 				pureRefDragLastY = cy;
@@ -2606,6 +2604,9 @@ public class BoMScreen extends Screen {
 				return true;
 			}
 			if (button == 0 && pureRefDraggingObject && selectedPureRefObject != null) {
+				if (selectedPureRefObject.locked) {
+					return true;
+				}
 				int dx = cx - pureRefDragLastX;
 				int dy = cy - pureRefDragLastY;
 				pureRefDragLastX = cx;
@@ -2856,22 +2857,41 @@ public class BoMScreen extends Screen {
 		updateCheckListEditorFields();
 	}
 
+	private List<BoardContextAction> getBoardContextActions() {
+		if (boardContextMenuObject == null) {
+			return List.of();
+		}
+		List<BoardContextAction> actions = Lists.newArrayList();
+		if (boardContextMenuObject instanceof PureRefProject.NoteObject
+			|| boardContextMenuObject instanceof PureRefProject.CheckListObject
+			|| boardContextMenuObject instanceof PureRefProject.TreeObject) {
+			actions.add(BoardContextAction.EDIT);
+		}
+		actions.add(BoardContextAction.DUPLICATE);
+		actions.add(BoardContextAction.DELETE);
+		actions.add(BoardContextAction.LOCK_TOGGLE);
+		actions.add(BoardContextAction.BRING_FRONT);
+		actions.add(BoardContextAction.SEND_BACK);
+		return actions;
+	}
+
 	private Bounds getBoardContextMenuBounds() {
 		int width = 160;
-		int height = boardContextMenuObject instanceof PureRefProject.NoteObject || boardContextMenuObject instanceof PureRefProject.ShapeObject ? 74 : 42;
+		boolean colorable = boardContextMenuObject instanceof PureRefProject.NoteObject || boardContextMenuObject instanceof PureRefProject.ShapeObject;
+		int height = 24 + getBoardContextActions().size() * 18 + (colorable ? 32 : 0) + 8;
 		int x = MathHelper.clamp(boardContextMenuX, 8, this.width - width - 8);
 		int y = MathHelper.clamp(boardContextMenuY, 64, this.height - height - 8);
 		return new Bounds(x, y, width, height);
 	}
 
-	private Bounds getBoardContextEditBounds(Bounds menu) {
-		return new Bounds(menu.x() + 10, menu.y() + 22, menu.width() - 20, 16);
+	private Bounds getBoardContextActionBounds(Bounds menu, int index) {
+		return new Bounds(menu.x() + 10, menu.y() + 22 + index * 18, menu.width() - 20, 16);
 	}
 
 	private Bounds getBoardContextColorBounds(Bounds menu, int index) {
 		int size = 18;
 		int startX = menu.x() + 10;
-		return new Bounds(startX + index * (size + 6), menu.y() + 46, size, size);
+		return new Bounds(startX + index * (size + 6), menu.y() + menu.height() - 24, size, size);
 	}
 
 	private void openBoardContextMenu(PureRefProject.Object object, int mouseX, int mouseY) {
@@ -2893,6 +2913,87 @@ public class BoMScreen extends Screen {
 		return 0xFFFFFFFF;
 	}
 
+	private int getBoardObjectLayer(PureRefProject.Object object) {
+		if (object instanceof PureRefProject.ShapeObject) {
+			return 0;
+		} else if (object instanceof PureRefProject.TreeObject) {
+			return 1;
+		} else if (object instanceof PureRefProject.CheckListObject) {
+			return 2;
+		}
+		return 3;
+	}
+
+	private List<PureRefProject.Object> getSortedBoardObjects() {
+		return project().objects.stream()
+			.sorted(Comparator
+				.comparingInt((PureRefProject.Object o) -> o.zIndex)
+				.thenComparingInt(this::getBoardObjectLayer)
+				.thenComparing(o -> o.id))
+			.toList();
+	}
+
+	private String getBoardContextActionLabel(BoardContextAction action) {
+		return switch (action) {
+			case EDIT -> "Edit";
+			case DUPLICATE -> "Duplicate";
+			case DELETE -> "Delete";
+			case LOCK_TOGGLE -> boardContextMenuObject != null && boardContextMenuObject.locked ? "Unlock" : "Lock";
+			case BRING_FRONT -> "Bring To Front";
+			case SEND_BACK -> "Send To Back";
+		};
+	}
+
+	private void normalizeBoardZOrder() {
+		List<PureRefProject.Object> ordered = getSortedBoardObjects();
+		for (int i = 0; i < ordered.size(); i++) {
+			ordered.get(i).zIndex = i;
+		}
+	}
+
+	private void duplicateBoardObject(PureRefProject.Object object) {
+		PureRefProject.Object copy = object.copy();
+		copy.x += 18;
+		copy.y += 18;
+		copy.zIndex = project().objects.stream().mapToInt(o -> o.zIndex).max().orElse(0) + 1;
+		project().objects.add(copy);
+		selectedPureRefObject = copy;
+		normalizeBoardZOrder();
+		markBoardDirty();
+	}
+
+	private int getNextBoardZIndex() {
+		return project().objects.stream().mapToInt(o -> o.zIndex).max().orElse(-1) + 1;
+	}
+
+	private void deleteBoardObject(PureRefProject.Object object) {
+		if (object instanceof PureRefProject.NoteObject note) {
+			if (editingNote != null) {
+				commitNoteEditor();
+			}
+			pendingNoteDelete = note;
+			return;
+		}
+		project().objects.remove(object);
+		if (selectedPureRefObject == object) {
+			selectedPureRefObject = null;
+		}
+		normalizeBoardZOrder();
+		markBoardDirty();
+	}
+
+	private void bringBoardObjectToFront(PureRefProject.Object object) {
+		object.zIndex = project().objects.stream().mapToInt(o -> o.zIndex).max().orElse(0) + 1;
+		normalizeBoardZOrder();
+		markBoardDirty();
+	}
+
+	private void sendBoardObjectToBack(PureRefProject.Object object) {
+		object.zIndex = project().objects.stream().mapToInt(o -> o.zIndex).min().orElse(0) - 1;
+		normalizeBoardZOrder();
+		markBoardDirty();
+	}
+
 	private void applyBoardContextColor(int color) {
 		if (boardContextMenuObject instanceof PureRefProject.NoteObject note) {
 			note.color = color;
@@ -2906,10 +3007,8 @@ public class BoMScreen extends Screen {
 
 	private void renderBoardContextMenu(EmiDrawContext context, int mouseX, int mouseY) {
 		Bounds menu = getBoardContextMenuBounds();
-		boolean editable = boardContextMenuObject instanceof PureRefProject.NoteObject
-			|| boardContextMenuObject instanceof PureRefProject.CheckListObject
-			|| boardContextMenuObject instanceof PureRefProject.TreeObject;
 		boolean colorable = boardContextMenuObject instanceof PureRefProject.NoteObject || boardContextMenuObject instanceof PureRefProject.ShapeObject;
+		List<BoardContextAction> actions = getBoardContextActions();
 		context.push();
 		context.matrices().translate(0, 0, 500);
 		RenderSystem.disableDepthTest();
@@ -2917,11 +3016,12 @@ public class BoMScreen extends Screen {
 		context.fill(menu.x(), menu.y(), menu.width(), menu.height(), 0xF1181D24);
 		context.fill(menu.x(), menu.y(), menu.width(), 18, 0xFF253442);
 		context.drawTextWithShadow(EmiPort.literal("Board Menu", Formatting.WHITE), menu.x() + 8, menu.y() + 5, -1);
-		if (editable) {
-			renderLibraryAction(context, getBoardContextEditBounds(menu), "Edit", true, mouseX, mouseY);
+		for (int i = 0; i < actions.size(); i++) {
+			Bounds actionBounds = getBoardContextActionBounds(menu, i);
+			renderLibraryAction(context, actionBounds, getBoardContextActionLabel(actions.get(i)), true, mouseX, mouseY);
 		}
 		if (colorable) {
-			context.drawTextWithShadow(EmiPort.literal("Color", Formatting.GRAY), menu.x() + 10, menu.y() + 34, -1);
+			context.drawTextWithShadow(EmiPort.literal("Color", Formatting.GRAY), menu.x() + 10, menu.y() + menu.height() - 36, -1);
 			int current = getBoardObjectColor(boardContextMenuObject);
 			for (int i = 0; i < BOARD_CONTEXT_COLORS.length; i++) {
 				Bounds swatch = getBoardContextColorBounds(menu, i);
@@ -2957,15 +3057,30 @@ public class BoMScreen extends Screen {
 			return false;
 		}
 		if (button == 0 || button == 1) {
-			if ((boardContextMenuObject instanceof PureRefProject.NoteObject || boardContextMenuObject instanceof PureRefProject.CheckListObject
-				|| boardContextMenuObject instanceof PureRefProject.TreeObject)
-				&& getBoardContextEditBounds(menu).contains(mouseX, mouseY)) {
-				if (boardContextMenuObject instanceof PureRefProject.NoteObject note) {
-					openNoteEditor(note);
-				} else if (boardContextMenuObject instanceof PureRefProject.CheckListObject checkList) {
-					openCheckListEditor(checkList);
-				} else if (boardContextMenuObject instanceof PureRefProject.TreeObject tree) {
-					enterPureRefTreeFocus(tree);
+			List<BoardContextAction> actions = getBoardContextActions();
+			for (int i = 0; i < actions.size(); i++) {
+				if (!getBoardContextActionBounds(menu, i).contains(mouseX, mouseY)) {
+					continue;
+				}
+				BoardContextAction action = actions.get(i);
+				switch (action) {
+					case EDIT -> {
+						if (boardContextMenuObject instanceof PureRefProject.NoteObject note) {
+							openNoteEditor(note);
+						} else if (boardContextMenuObject instanceof PureRefProject.CheckListObject checkList) {
+							openCheckListEditor(checkList);
+						} else if (boardContextMenuObject instanceof PureRefProject.TreeObject tree) {
+							enterPureRefTreeFocus(tree);
+						}
+					}
+					case DUPLICATE -> duplicateBoardObject(boardContextMenuObject);
+					case DELETE -> deleteBoardObject(boardContextMenuObject);
+					case LOCK_TOGGLE -> {
+						boardContextMenuObject.locked = !boardContextMenuObject.locked;
+						markBoardDirty();
+					}
+					case BRING_FRONT -> bringBoardObjectToFront(boardContextMenuObject);
+					case SEND_BACK -> sendBoardObjectToBack(boardContextMenuObject);
 				}
 				closeBoardContextMenu();
 				return true;
@@ -3422,18 +3537,15 @@ public class BoMScreen extends Screen {
 		view.translate(offX, offY, 0);
 		EmiPort.applyModelViewMatrix();
 		renderPureRefGrid(context);
-		for (PureRefProject.Object object : project().objects) {
-			if (object instanceof PureRefProject.ShapeObject shape) {
-				renderPureRefShape(context, shape);
-			}
-		}
-		for (PureRefProject.Object object : project().objects) {
+		for (PureRefProject.Object object : getSortedBoardObjects()) {
 			if (object instanceof PureRefProject.TreeObject tree) {
 				renderPureRefTreeCard(context, raw, tree, canvasX, canvasY, delta);
 			} else if (object instanceof PureRefProject.NoteObject note) {
 				renderPureRefNote(context, note, canvasX, canvasY);
 			} else if (object instanceof PureRefProject.CheckListObject checkList) {
 				renderPureRefCheckList(context, checkList, canvasX, canvasY, delta);
+			} else if (object instanceof PureRefProject.ShapeObject shape) {
+				renderPureRefShape(context, shape);
 			}
 		}
 		if (pendingTreeInsert != null) {
@@ -3453,7 +3565,7 @@ public class BoMScreen extends Screen {
 		renderPureRefToolbar(context, mouseX, mouseY);
 		String hint = pendingTreeInsert != null
 			? "LMB: place tree  |  Esc: cancel placement"
-			: "MMB drag: pan  |  Wheel: zoom  |  Double click tree/note/checklist: edit  |  Del: remove  |  Ctrl+D: duplicate";
+			: "MMB drag: pan  |  Wheel: zoom  |  RMB object: menu  |  LMB drag: move  |  Del: remove  |  Ctrl+D: duplicate";
 		context.drawTextWithShadow(EmiPort.literal(hint, Formatting.DARK_GRAY),
 			8, height - 28, -1);
 		if (pendingNoteDelete != null) {
@@ -3532,7 +3644,7 @@ public class BoMScreen extends Screen {
 		context.fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(), hovered ? 0xF1283340 : 0xE01C252E);
 		context.fill(bounds.x(), bounds.y(), bounds.width(), BOARD_TREE_HEADER_HEIGHT, 0xFF24394A);
 		context.fill(bounds.x(), bounds.y(), 3, bounds.height(), 0xFF8AB7D6);
-		String editHint = "RMB Edit";
+		String editHint = tree.locked ? "Locked" : "RMB Edit";
 		int hintWidth = textRenderer.getWidth(editHint);
 		context.drawTextWithShadow(EmiPort.literal(editHint, Formatting.DARK_GRAY), bounds.x() + bounds.width() - hintWidth - 8, bounds.y() + 5, -1);
 		context.drawTextWithShadow(trimLibraryText(tree.title, bounds.width() - hintWidth - 28, Formatting.WHITE), bounds.x() + 8, bounds.y() + 5, -1);
@@ -3654,6 +3766,9 @@ public class BoMScreen extends Screen {
 		String title = checkList.title == null || checkList.title.isBlank() ? "Checklist" : checkList.title;
 		context.drawTextWithShadow(trimLibraryText(title, bounds.width() - 16, Formatting.WHITE), bounds.x() + 8, bounds.y() + 5, -1);
 		String linkText = checkList.linkedTreeObjectId == null ? "Manual list" : "Linked tree";
+		if (checkList.locked) {
+			linkText = linkText + "  |  Locked";
+		}
 		context.drawTextWithShadow(EmiPort.literal(linkText, Formatting.DARK_GRAY), bounds.x() + 8, bounds.y() + bounds.height() - 13, -1);
 		int listY = bounds.y() + 24;
 		int rowHeight = 16;
@@ -3704,16 +3819,26 @@ public class BoMScreen extends Screen {
 
 	private void renderPureRefSelection(EmiDrawContext context, PureRefProject.Object object) {
 		Bounds bounds = getPureRefObjectBounds(object);
-		context.fill(bounds.x() - 1, bounds.y() - 1, bounds.width() + 2, 1, 0xFF7BA7D0);
-		context.fill(bounds.x() - 1, bounds.y() + bounds.height(), bounds.width() + 2, 1, 0xFF7BA7D0);
-		context.fill(bounds.x() - 1, bounds.y(), 1, bounds.height(), 0xFF7BA7D0);
-		context.fill(bounds.x() + bounds.width(), bounds.y(), 1, bounds.height(), 0xFF7BA7D0);
+		int border = object.locked ? 0xFFF0D46A : 0xFF7BA7D0;
+		context.fill(bounds.x() - 1, bounds.y() - 1, bounds.width() + 2, 1, border);
+		context.fill(bounds.x() - 1, bounds.y() + bounds.height(), bounds.width() + 2, 1, border);
+		context.fill(bounds.x() - 1, bounds.y(), 1, bounds.height(), border);
+		context.fill(bounds.x() + bounds.width(), bounds.y(), 1, bounds.height(), border);
+		if (object.locked) {
+			renderComparePill(context, "Locked", bounds.x(), bounds.y() - 11, 0xE0A37C19, 0xFFFFF5D0);
+		}
 		if (object instanceof PureRefProject.ShapeObject shape) {
-			renderShapeHandles(context, shape);
+			if (!object.locked) {
+				renderShapeHandles(context, shape);
+			}
 		} else if (object instanceof PureRefProject.TreeObject tree) {
-			drawHandle(context, tree.x + tree.width, tree.y + tree.height, pureRefResizingTree);
+			if (!object.locked) {
+				drawHandle(context, tree.x + tree.width, tree.y + tree.height, pureRefResizingTree);
+			}
 		} else if (object instanceof PureRefProject.CheckListObject checkList) {
-			drawHandle(context, checkList.x + checkList.width, checkList.y + checkList.height, pureRefResizingCheckList);
+			if (!object.locked) {
+				drawHandle(context, checkList.x + checkList.width, checkList.y + checkList.height, pureRefResizingCheckList);
+			}
 		}
 	}
 
@@ -3773,20 +3898,21 @@ public class BoMScreen extends Screen {
 	}
 
 	private PureRefProject.Object getPureRefObjectAt(int x, int y) {
-		for (int i = project().objects.size() - 1; i >= 0; i--) {
-			PureRefProject.Object object = project().objects.get(i);
+		List<PureRefProject.Object> ordered = getSortedBoardObjects();
+		for (int i = ordered.size() - 1; i >= 0; i--) {
+			PureRefProject.Object object = ordered.get(i);
 			if (!(object instanceof PureRefProject.ShapeObject) && getPureRefObjectBounds(object).contains(x, y)) {
 				return object;
 			}
 		}
-		for (int i = project().objects.size() - 1; i >= 0; i--) {
-			PureRefProject.Object object = project().objects.get(i);
+		for (int i = ordered.size() - 1; i >= 0; i--) {
+			PureRefProject.Object object = ordered.get(i);
 			if (object instanceof PureRefProject.ShapeObject shape && getShapeHandle(shape, x, y) != ShapeHandle.NONE) {
 				return object;
 			}
 		}
-		for (int i = project().objects.size() - 1; i >= 0; i--) {
-			PureRefProject.Object object = project().objects.get(i);
+		for (int i = ordered.size() - 1; i >= 0; i--) {
+			PureRefProject.Object object = ordered.get(i);
 			if (object instanceof PureRefProject.ShapeObject && getPureRefObjectBounds(object).contains(x, y)) {
 				return object;
 			}
@@ -3882,6 +4008,7 @@ public class BoMScreen extends Screen {
 			return;
 		}
 		activeShapeDraft = new PureRefProject.ShapeObject(PureRefProject.nextObjectId(), x, y, x, y, shape, 0xFF89B8E8, 2);
+		activeShapeDraft.zIndex = getNextBoardZIndex();
 		project().objects.add(activeShapeDraft);
 		selectedPureRefObject = activeShapeDraft;
 		pureRefCreatingShape = true;
