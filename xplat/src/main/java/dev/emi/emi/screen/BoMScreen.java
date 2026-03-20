@@ -840,7 +840,7 @@ public class BoMScreen extends Screen {
 
 	private String getProjectSummary(PureRefProject project, boolean worldProject) {
 		if (worldProject) {
-			return "Current world board  |  autosaved";
+			return "Current world board  |  " + getBoardSaveStatusText();
 		}
 		if (project.isEmpty()) {
 			return "Save current board here";
@@ -874,6 +874,25 @@ public class BoMScreen extends Screen {
 			parts.add(shapes + (shapes == 1 ? " shape" : " shapes"));
 		}
 		return parts.isEmpty() ? "Empty project" : String.join("  |  ", parts);
+	}
+
+	private String getBoardSaveStatusText() {
+		String status = BoM.getPureRefSaveStatusText();
+		long millis = BoM.getLastPureRefSaveMillis();
+		if (BoM.getPureRefSaveState() == BoM.PureRefSaveState.SAVED && millis > 0) {
+			long ageSeconds = Math.max(0L, (System.currentTimeMillis() - millis) / 1000L);
+			if (ageSeconds < 5) {
+				return "Saved just now";
+			}
+			if (ageSeconds < 60) {
+				return "Saved " + ageSeconds + "s ago";
+			}
+			long ageMinutes = ageSeconds / 60L;
+			if (ageMinutes < 60) {
+				return "Saved " + ageMinutes + "m ago";
+			}
+		}
+		return status;
 	}
 
 	private void loadProjectSlot(int slot) {
@@ -3776,6 +3795,8 @@ public class BoMScreen extends Screen {
 			: "MMB drag: pan  |  Wheel: zoom  |  RMB object: menu  |  LMB drag: move  |  Del: remove  |  Ctrl+D: duplicate";
 		context.drawTextWithShadow(EmiPort.literal(hint, Formatting.DARK_GRAY),
 			8, height - 28, -1);
+		context.drawTextWithShadow(EmiPort.literal("World Project  |  " + getBoardSaveStatusText(), Formatting.GRAY),
+			8, height - 42, -1);
 		if (pendingNoteDelete != null) {
 			renderNoteDeleteConfirmation(context, mouseX, mouseY);
 		}

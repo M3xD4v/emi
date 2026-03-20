@@ -73,7 +73,9 @@ public class EmiPersistentData {
 			try (FileWriter writer = new FileWriter(file)) {
 				GSON.toJson(json, writer);
 			}
+			BoM.markPureRefSaved();
 		} catch (Exception e) {
+			BoM.markPureRefSaveFailed();
 			EmiLog.error("Failed to write world board project", e);
 		}
 	}

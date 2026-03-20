@@ -42,6 +42,8 @@ public class BoM {
 		return thread;
 	});
 	private static final Object PURE_REF_AUTOSAVE_LOCK = new Object();
+	private static volatile PureRefSaveState pureRefSaveState = PureRefSaveState.SAVED;
+	private static volatile long lastPureRefSaveMillis = 0L;
 	public static MaterialTree tree;
 	public static Map<EmiIngredient, EmiRecipe> defaultRecipes = Maps.newHashMap();
 	public static Map<EmiIngredient, EmiRecipe> addedRecipes = Maps.newHashMap();
@@ -133,6 +135,7 @@ public class BoM {
 	public static void markPureRefDirty() {
 		synchronized (PURE_REF_AUTOSAVE_LOCK) {
 			pureRefAutosaveDirty = true;
+			pureRefSaveState = PureRefSaveState.UNSAVED;
 			if (pureRefAutosaveFuture != null) {
 				pureRefAutosaveFuture.cancel(false);
 			}
@@ -151,6 +154,7 @@ public class BoM {
 			}
 		}
 		if (shouldSave) {
+			pureRefSaveState = PureRefSaveState.SAVING;
 			MinecraftClient client = MinecraftClient.getInstance();
 			if (client != null) {
 				client.execute(dev.emi.emi.runtime.EmiPersistentData::saveWorldProject);
@@ -158,6 +162,32 @@ public class BoM {
 				dev.emi.emi.runtime.EmiPersistentData.saveWorldProject();
 			}
 		}
+	}
+
+	public static void markPureRefSaved() {
+		pureRefSaveState = PureRefSaveState.SAVED;
+		lastPureRefSaveMillis = System.currentTimeMillis();
+	}
+
+	public static void markPureRefSaveFailed() {
+		pureRefSaveState = PureRefSaveState.ERROR;
+	}
+
+	public static PureRefSaveState getPureRefSaveState() {
+		return pureRefSaveState;
+	}
+
+	public static String getPureRefSaveStatusText() {
+		return switch (pureRefSaveState) {
+			case UNSAVED -> "Unsaved changes";
+			case SAVING -> "Saving...";
+			case ERROR -> "Save failed";
+			case SAVED -> "Saved";
+		};
+	}
+
+	public static long getLastPureRefSaveMillis() {
+		return lastPureRefSaveMillis;
 	}
 
 	public static void loadAdded(JsonObject object) {
@@ -360,6 +390,7 @@ public class BoM {
 	public static void setWorldProject(PureRefProject project) {
 		if (project == null) {
 			pureRefProject = PureRefProject.workingCopy();
+			pureRefSaveState = PureRefSaveState.SAVED;
 			return;
 		}
 		PureRefProject copy = project.copy();
@@ -369,6 +400,7 @@ public class BoM {
 			stored.name = "World Project";
 		}
 		pureRefProject = stored;
+		pureRefSaveState = PureRefSaveState.SAVED;
 	}
 
 	public static PureRefProject snapshotWorldProject() {
@@ -561,5 +593,12 @@ public class BoM {
 		EMPTY,
 		PARTIAL,
 		FULL
+	}
+
+	public static enum PureRefSaveState {
+		SAVED,
+		SAVING,
+		UNSAVED,
+		ERROR
 	}
 }
